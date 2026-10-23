@@ -1,0 +1,25 @@
+# Local secrets and environment files; keep the example template tracked.
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Python virtual environments (including named recovery environments).
+**/.venv*/
+
+# JavaScript dependencies and build output.
+**/node_modules/
+**/dist/
+**/build/
+**/out/
+**/.vite/
+
+# Python and test caches / generated artifacts.
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/*.egg-info/
