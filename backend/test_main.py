@@ -28,6 +28,136 @@ def test_plan_returns_estimates_and_tasks():
 def test_plan_rejects_invalid_completion():
     assert client.post('/api/plan', json={'area_sqft':1000,'completion':101,'budget':1}).status_code == 422
 
+@pytest.mark.parametrize('area', [0, -1, 10000001])
+def test_plan_rejects_invalid_or_extreme_area(area):
+    assert client.post('/api/plan', json={'area_sqft': area}).status_code == 422
+
+def test_plan_has_editable_property_and_structure_inputs_and_no_budget_variance():
+    response = client.post('/api/plan', json={
+        'area_sqft': 1000, 'location': 'Tier 1', 'property_tier': 'Premium',
+        'building_type': 'Residential house', 'budget': 1,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data['estimated_total_inr'] == 2690400
+    assert data['provider'] == 'Deterministic estimate'
+    assert 'budget_variance_inr' not in data
+    assert 'budget_inr' not in data
+    assert any('City Tier 1 factor: 1.18' in line for line in data['assumptions'])
+    assert any('Property Premium factor: 1.20' in line for line in data['assumptions'])
+    assert 'not a professional valuation' in data['assumptions'][-1]
+
+@pytest.mark.parametrize('structure', [
+    'Residential house', 'Apartment building', 'Commercial building',
+    'Warehouse / industrial', 'Renovation',
+])
+def test_plan_supports_each_structure_type(structure):
+    response = client.post('/api/plan', json={'area_sqft': 500, 'building_type': structure, 'property_tier': 'Value'})
+    assert response.status_code == 200
+    assert response.json()['estimated_total_inr'] > 0
+
+def test_plan_rejects_invalid_tiers_and_extreme_material_inputs():
+    base = {'area_sqft': 1000}
+    assert client.post('/api/plan', json={**base, 'location': 'Tier 4'}).status_code == 422
+    assert client.post('/api/plan', json={**base, 'property_tier': 'Ultra'}).status_code == 422
+    assert client.post('/api/plan', json={**base, 'materials': [{'name':'Cement','quantity':100000001,'unit':'bags','rate':1}]}).status_code == 422
+
+class FakeWeatherResponse:
+    def __init__(self, payload): self.payload = payload
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def read(self): return json.dumps(self.payload).encode()
+
+def test_weather_location_geocodes_and_returns_real_provider_fields(monkeypatch):
+    responses = [
+        {'results': [{'name': 'Pune', 'admin1': 'Maharashtra', 'country': 'India', 'latitude': 18.52, 'longitude': 73.86}]},
+        {
+            'current': {'time': '2026-10-24T12:00', 'temperature_2m': 29.1, 'precipitation': 0.2, 'wind_speed_10m': 11.4, 'weather_code': 2},
+            'daily': {'time': ['2026-10-24', '2026-10-25', '2026-10-26'], 'temperature_2m_min': [20, 21, 19], 'temperature_2m_max': [30, 31, 29], 'precipitation_probability_max': [10, 20, 5], 'weather_code': [2, 61, 0]},
+        },
+    ]
+    urls = []
+    def fake_urlopen(url, timeout):
+        urls.append(str(url))
+        assert timeout == 8
+        return FakeWeatherResponse(responses.pop(0))
+    monkeypatch.setattr(main.urllib.request, 'urlopen', fake_urlopen)
+
+    response = client.get('/api/weather', params={'location': 'Pune'})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data['available'] is True
+    assert data['location'] == 'Pune, Maharashtra, India'
+    assert data['current']['temperature_c'] == 29.1
+    assert data['current']['condition'] == 'Partly cloudy'
+    assert data['forecast'][1]['condition'] == 'Light rain'
+    assert data['forecast'][1]['precipitation_probability_percent'] == 20
+    assert 'geocoding-api.open-meteo.com' in urls[0]
+    assert 'api.open-meteo.com/v1/forecast' in urls[1]
+
+def test_weather_invalid_location_returns_clear_not_found(monkeypatch):
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeWeatherResponse({'results': []}))
+    response = client.get('/api/weather', params={'location': 'No Such Place'})
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Location not found. Check the spelling and try again.'
+
+def test_weather_provider_failure_is_explicit_and_does_not_invent_conditions(monkeypatch):
+    calls = [0]
+    def fake_urlopen(_url, timeout):
+        calls[0] += 1
+        if calls[0] == 1:
+            return FakeWeatherResponse({'results': [{'name': 'Pune', 'latitude': 18.52, 'longitude': 73.86}]})
+        raise OSError('provider offline')
+    monkeypatch.setattr(main.urllib.request, 'urlopen', fake_urlopen)
+    response = client.get('/api/weather', params={'location': 'Pune'})
+    assert response.status_code == 503
+    assert response.json()['detail'] == 'Live weather provider is unavailable. Try again shortly.'
+
+def test_weather_geocoding_timeout_is_distinct_and_logged(monkeypatch, caplog):
+    def timeout(*_args, **_kwargs):
+        raise TimeoutError('provider timed out')
+    monkeypatch.setattr(main.urllib.request, 'urlopen', timeout)
+    response = client.get('/api/weather', params={'location': 'Pune'})
+    assert response.status_code == 503
+    assert response.json()['detail'] == 'Weather location lookup timed out. Try again shortly.'
+    assert 'stage=geocoding kind=timeout' in caplog.text
+
+def test_weather_http_error_logs_status_and_sanitizes_body(monkeypatch, caplog):
+    responses = [
+        FakeWeatherResponse({'results': [{'name': 'Pune', 'latitude': 18.52, 'longitude': 73.86}]}),
+    ]
+    def provider(url, timeout):
+        if responses:
+            return responses.pop()
+        raise HTTPError('https://api.open-meteo.com/?api_key=never-log-this', 503, 'UNAVAILABLE', {}, io.BytesIO(b'UNAVAILABLE api_key=never-log-this'))
+    monkeypatch.setattr(main.urllib.request, 'urlopen', provider)
+    response = client.get('/api/weather', params={'location': 'Pune'})
+    assert response.status_code == 503
+    assert response.json()['detail'] == 'Live weather provider is unavailable. Try again shortly.'
+    assert 'stage=forecast kind=http_error status=503' in caplog.text
+    assert 'never-log-this' not in caplog.text
+    assert 'api.open-meteo.com' not in caplog.text
+
+def test_weather_malformed_forecast_is_logged_and_returned_safely(monkeypatch, caplog):
+    responses = [
+        FakeWeatherResponse({'results': [{'name': 'Pune', 'latitude': 18.52, 'longitude': 73.86}]}),
+        FakeWeatherResponse({'current': {}, 'daily': {'time': []}}),
+    ]
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: responses.pop(0))
+    response = client.get('/api/weather', params={'location': 'Pune'})
+    assert response.status_code == 502
+    assert response.json()['detail'] == 'Weather provider returned an invalid response. Try again shortly.'
+    assert 'stage=forecast kind=malformed_response' in caplog.text
+
+def test_weather_requires_coordinate_pair_and_keeps_no_location_empty(monkeypatch):
+    assert client.get('/api/weather', params={'latitude': 18.52}).status_code == 422
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: pytest.fail('No provider request expected'))
+    response = client.get('/api/weather')
+    assert response.status_code == 200
+    assert response.json()['available'] is False
+    assert response.json()['forecast'] == []
+
 def test_image_analysis_does_not_fake_without_key(monkeypatch):
     monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     response = client.post('/api/analyze?mode=safety', files={'image':('site.jpg',b'img','image/jpeg')})
