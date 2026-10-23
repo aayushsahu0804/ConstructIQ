@@ -4,7 +4,7 @@ from typing import Literal
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 if __package__:  # `uvicorn backend.main:app` from project root.
     from .config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_fallback_model, gemini_model, gemini_timeout_seconds
 else:  # `uvicorn main:app` from backend/.
@@ -32,22 +32,22 @@ class ImageAnalysis(StrictModel):
     limitations: list[str]
 class Material(StrictModel):
     name: str
-    quantity: float = Field(ge=0)
+    quantity: float = Field(ge=0, le=100000000)
     unit: str
-    rate: float = Field(ge=0)
+    rate: float = Field(ge=0, le=1000000)
 class PlanRequest(StrictModel):
     area_sqft: float = Field(gt=0, le=10000000)
-    location: str = "Tier 1"
-    building_type: str = "Residential"
-    completion: float = Field(ge=0, le=100)
-    budget: float = Field(ge=0)
+    location: Literal["Tier 1", "Tier 2", "Tier 3"] = "Tier 1"
+    building_type: Literal["Residential", "Commercial", "Industrial", "Residential house", "Apartment building", "Commercial building", "Warehouse / industrial", "Renovation"] = "Residential house"
+    property_tier: Literal["Value", "Standard", "Premium", "Luxury"] = "Standard"
+    completion: float = Field(default=0, ge=0, le=100)
+    # Accepted for compatibility with older clients; it does not affect estimates.
+    budget: float | None = Field(default=None, ge=0, le=1000000000000000)
     materials: list[Material] = Field(default_factory=list)
 class PlanResponse(StrictModel):
     provider: str
     completion: float
     estimated_total_inr: float
-    budget_inr: float
-    budget_variance_inr: float
     cost_breakdown: dict[str, float]
     materials: list[Material]
     assumptions: list[str]
@@ -60,11 +60,29 @@ class AssistantResponse(StrictModel):
     provider: str
     answer: str
     guidance: list[str]
+class WeatherCurrent(StrictModel):
+    observed_at: str
+    temperature_c: float
+    precipitation_mm: float
+    wind_speed_kmh: float
+    weather_code: int
+    condition: str
+
+class WeatherForecastDay(StrictModel):
+    date: str
+    minimum_c: float
+    maximum_c: float
+    precipitation_probability_percent: float
+    weather_code: int
+    condition: str
+
 class WeatherResponse(StrictModel):
     available: bool
     location: str
     summary: str
     guidance: list[str]
+    current: WeatherCurrent | None = None
+    forecast: list[WeatherForecastDay] = Field(default_factory=list)
 
 @app.get("/")
 def root(): return {"message": "Construction Intelligence API is running", "status": "ok"}
@@ -237,15 +255,42 @@ async def analyze(mode: Literal["safety", "crack"], image: UploadFile = File(...
 
 @app.post("/api/plan", response_model=PlanResponse)
 def plan(req: PlanRequest):
-    tier = req.location.lower()
-    mult = 1.18 if "1" in tier or "metro" in tier else (1.08 if "2" in tier else 1.0)
-    base = {"Residential": 1900, "Commercial": 2500, "Industrial": 1700}.get(req.building_type, 1900) * mult
-    materials = req.materials or [Material(name="Cement", quantity=round(req.area_sqft * .42, 1), unit="bags", rate=390), Material(name="Steel", quantity=round(req.area_sqft * 3.8, 1), unit="kg", rate=68), Material(name="Sand", quantity=round(req.area_sqft * 1.2, 1), unit="cu ft", rate=55)]
+    # Indicative base benchmarks per sq ft; selected tier factors are stated in the output.
+    base_rates = {
+        "Residential": 1900, "Residential house": 1900, "Apartment building": 2200,
+        "Commercial": 2500, "Commercial building": 2500,
+        "Industrial": 1700, "Warehouse / industrial": 1700, "Renovation": 1500,
+    }
+    city_factors = {"Tier 1": 1.18, "Tier 2": 1.08, "Tier 3": 1.0}
+    property_factors = {"Value": 0.9, "Standard": 1.0, "Premium": 1.2, "Luxury": 1.45}
+    materials = req.materials or [
+        Material(name="Cement", quantity=round(req.area_sqft * .42, 1), unit="bags", rate=390),
+        Material(name="Steel", quantity=round(req.area_sqft * 3.8, 1), unit="kg", rate=68),
+        Material(name="Sand", quantity=round(req.area_sqft * 1.2, 1), unit="cu ft", rate=55),
+    ]
     material_cost = sum(m.quantity * m.rate for m in materials)
-    total = max(base * req.area_sqft, material_cost)
+    benchmark = max(base_rates[req.building_type] * req.area_sqft, material_cost)
+    total = benchmark * city_factors[req.location] * property_factors[req.property_tier]
     breakdown = {"Materials": round(total * .52), "Labour": round(total * .24), "Services": round(total * .12), "Finishes": round(total * .08), "Contingency": round(total * .04)}
-    return PlanResponse(provider="Deterministic estimate", completion=req.completion, estimated_total_inr=round(total), budget_inr=req.budget, budget_variance_inr=round(req.budget-total), cost_breakdown=breakdown, materials=materials, assumptions=["Early-stage benchmark allowance; validate rates, quantities, taxes and specifications locally.", "Location tier adjusts the baseline allowance; site access, design and market movement are not modeled.", "Figures are estimates only, not a professional valuation, tender or quotation."], tasks=[{"task":"Site setup & foundations","duration":"Weeks 1–4","resource":"Civil crew, excavator"},{"task":"Structure & slab","duration":"Weeks 5–12","resource":"Formwork, steel, concrete crew"},{"task":"MEP rough-in & masonry","duration":"Weeks 13–18","resource":"Electrical, plumbing, masonry teams"},{"task":"Finishes & handover","duration":"Weeks 19–24","resource":"Finishing crew, QA"}], summary=f"At {req.completion:.0f}% completion, estimated remaining allowance is ₹{total*(100-req.completion)/100:,.0f}. Confirm quantities and local rates before commitment.")
-
+    assumptions = [
+        f"Base indicative rate for {req.building_type}: ₹{base_rates[req.building_type]:,.0f}/sq ft before tier factors.",
+        f"City {req.location} factor: {city_factors[req.location]:.2f}×; this is a broad location allowance, not a city-specific quote.",
+        f"Property {req.property_tier} factor: {property_factors[req.property_tier]:.2f}×; this represents an indicative specification/finish allowance.",
+        "Material benchmark quantities and rates are approximate; review them in the editable material inputs and validate locally.",
+        "The task sequence and durations are a basic planning template; confirm the schedule against actual site conditions and resources.",
+        "Estimate excludes site-specific design, taxes, approvals, access constraints and market changes; it is not a professional valuation, tender or quotation.",
+    ]
+    return PlanResponse(
+        provider="Deterministic estimate", completion=req.completion, estimated_total_inr=round(total),
+        cost_breakdown=breakdown, materials=materials, assumptions=assumptions,
+        tasks=[
+            {"task": "Site setup & foundations", "duration": "Weeks 1–4", "resource": "Civil crew, excavator"},
+            {"task": "Structure & slab", "duration": "Weeks 5–12", "resource": "Formwork, steel, concrete crew"},
+            {"task": "MEP rough-in & masonry", "duration": "Weeks 13–18", "resource": "Electrical, plumbing, masonry teams"},
+            {"task": "Finishes & handover", "duration": "Weeks 19–24", "resource": "Finishing crew, QA"},
+        ],
+        summary=f"Indicative benchmark estimate for {req.area_sqft:,.0f} sq ft; confirm specifications, quantities and local rates before commitment.",
+    )
 @app.post("/api/assistant", response_model=AssistantResponse)
 def assistant(req: AssistantRequest):
     if gemini_api_key():
@@ -259,11 +304,139 @@ def assistant(req: AssistantRequest):
     if req.kind == "daily_report": return AssistantResponse(provider="Guided template", answer="Draft structure (fill only from site records):", guidance=["Date / site / verified weather", "Work completed and measured quantities", "Crew and equipment", "Deliveries and inspections", "Safety observations and corrective actions", "Delays and next shift plan"])
     return AssistantResponse(provider="Offline guidance", answer="I can provide general construction guidance. Include project type, location and relevant dimensions for a more useful answer. This is not an engineering determination.", guidance=["For structural movement, isolate immediate hazards and consult a qualified local structural engineer.", "Confirm applicable local requirements with the responsible professional."])
 
-@app.get("/api/weather", response_model=WeatherResponse)
-def weather(latitude: float = -1, longitude: float = -1, location: str = "site"):
-    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180): return WeatherResponse(available=False, location=location, summary="Live weather unavailable: provide valid coordinates.", guidance=["Check a trusted local forecast before outdoor work."])
+def _weather_condition(code: int) -> str:
+    conditions = {
+        0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
+        45: "Fog", 48: "Freezing fog", 51: "Light drizzle", 53: "Drizzle", 55: "Dense drizzle",
+        61: "Light rain", 63: "Rain", 65: "Heavy rain", 71: "Light snow", 73: "Snow",
+        75: "Heavy snow", 80: "Rain showers", 81: "Rain showers", 82: "Heavy rain showers",
+        95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with hail",
+    }
+    return conditions.get(code, "Conditions reported")
+
+def _weather_safe_detail(value: str) -> str:
+    value = re.sub(r"https?://\S+", "[URL REDACTED]", value)
+    value = re.sub(r"(?i)(api[_-]?key|authorization|token)\s*[:=]\s*[^,\s\"']+", r"\1=[REDACTED]", value)
+    return re.sub(r"[\r\n\t]+", " ", value)[:400]
+
+def _weather_json(url: str, stage: str) -> dict:
     try:
-        url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({"latitude": latitude, "longitude": longitude, "current": "temperature_2m,precipitation,wind_speed_10m", "timezone": "auto"})
-        with urllib.request.urlopen(url, timeout=8) as r: current = json.loads(r.read())["current"]
-        return WeatherResponse(available=True, location=location, summary=f"Current: {current['temperature_2m']}°C, precipitation {current['precipitation']} mm, wind {current['wind_speed_10m']} km/h.", guidance=["Use site-specific thresholds for lifting and work at height; weather alone does not establish safe operation."])
-    except Exception: return WeatherResponse(available=False, location=location, summary="Live weather data is temporarily unavailable.", guidance=["Check a trusted local forecast before outdoor work."])
+        with urllib.request.urlopen(url, timeout=8) as response:
+            payload = json.loads(response.read())
+    except HTTPError as exc:
+        try:
+            body = exc.read(1200).decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        logger.warning("Weather provider failure: stage=%s kind=http_error status=%s detail=%s", stage, exc.code, _weather_safe_detail(body or exc.reason))
+        raise
+    except (TimeoutError, socket.timeout) as exc:
+        logger.warning("Weather provider failure: stage=%s kind=timeout timeout_seconds=8", stage)
+        raise
+    except URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            logger.warning("Weather provider failure: stage=%s kind=timeout timeout_seconds=8", stage)
+        else:
+            logger.warning("Weather provider failure: stage=%s kind=network_error detail=%s", stage, _weather_safe_detail(str(reason)))
+        raise
+    except OSError as exc:
+        logger.warning("Weather provider failure: stage=%s kind=network_error detail=%s", stage, _weather_safe_detail(str(exc)))
+        raise
+    except json.JSONDecodeError as exc:
+        logger.warning("Weather provider failure: stage=%s kind=malformed_json detail=%s", stage, _weather_safe_detail(str(exc)))
+        raise
+    except Exception as exc:
+        logger.warning("Weather provider failure: stage=%s kind=%s detail=%s", stage, type(exc).__name__, _weather_safe_detail(str(exc)))
+        raise
+    if not isinstance(payload, dict):
+        logger.warning("Weather provider failure: stage=%s kind=malformed_response detail=top-level JSON must be an object", stage)
+        raise ValueError("invalid weather provider response")
+    return payload
+
+def _weather_http_error(stage: str, exc: Exception) -> HTTPException:
+    if isinstance(exc, (TimeoutError, socket.timeout)) or (isinstance(exc, URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout))):
+        detail = "Weather location lookup timed out. Try again shortly." if stage == "geocoding" else "Live weather request timed out. Try again shortly."
+        return HTTPException(503, detail)
+    if stage == "geocoding":
+        return HTTPException(503, "Location lookup is unavailable. Try again shortly.")
+    return HTTPException(503, "Live weather provider is unavailable. Try again shortly.")
+
+@app.get("/api/weather", response_model=WeatherResponse)
+def weather(latitude: float | None = None, longitude: float | None = None, location: str | None = None):
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(422, "Provide both latitude and longitude, or enter a location.")
+    place = location.strip() if location else ""
+    if len(place) > 120:
+        raise HTTPException(422, "Location must be 120 characters or fewer.")
+    if latitude is None and not place:
+        return WeatherResponse(available=False, location="", summary="Enter a city or location to request live weather.", guidance=["Weather is not inferred when no location is supplied."])
+
+    if latitude is None:
+        try:
+            geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": place, "count": 1, "language": "en", "format": "json"})
+            geocoding = _weather_json(geo_url, "geocoding")
+            results = geocoding.get("results") or []
+            if not results:
+                raise HTTPException(404, "Location not found. Check the spelling and try again.")
+            match = results[0]
+            if not isinstance(match, dict):
+                raise ValueError("invalid geocoding result shape")
+            latitude = float(match["latitude"])
+            longitude = float(match["longitude"])
+            place = ", ".join(dict.fromkeys(part for part in (match.get("name"), match.get("admin1"), match.get("country")) if part))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if not isinstance(exc, (HTTPError, URLError, TimeoutError, socket.timeout, json.JSONDecodeError, ValueError, KeyError, TypeError)):
+                logger.warning("Weather provider failure: stage=geocoding kind=%s detail=%s", type(exc).__name__, _weather_safe_detail(str(exc)))
+            if isinstance(exc, (HTTPError, URLError, TimeoutError, socket.timeout, OSError)):
+                raise _weather_http_error("geocoding", exc)
+            logger.warning("Weather provider failure: stage=geocoding kind=malformed_response detail=%s", _weather_safe_detail(str(exc)))
+            raise HTTPException(502, "Location service returned an invalid response. Try again shortly.")
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise HTTPException(422, "Enter a valid location or coordinate pair.")
+    place = place or f"{latitude:.3f}, {longitude:.3f}"
+    weather_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
+        "latitude": latitude, "longitude": longitude,
+        "current": "temperature_2m,precipitation,wind_speed_10m,weather_code",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "forecast_days": 3, "timezone": "auto",
+    })
+    try:
+        payload = _weather_json(weather_url, "forecast")
+        current_data = payload["current"]
+        if not isinstance(current_data, dict):
+            raise ValueError("invalid current conditions shape")
+        current_code = int(current_data["weather_code"])
+        current = WeatherCurrent(
+            observed_at=str(current_data["time"]), temperature_c=float(current_data["temperature_2m"]),
+            precipitation_mm=float(current_data["precipitation"]), wind_speed_kmh=float(current_data["wind_speed_10m"]),
+            weather_code=current_code, condition=_weather_condition(current_code),
+        )
+        daily = payload["daily"]
+        if not isinstance(daily, dict) or not isinstance(daily.get("time"), list):
+            raise ValueError("invalid forecast shape")
+        forecast_count = min(3, len(daily["time"]))
+        if forecast_count == 0 or any(not isinstance(daily.get(key), list) or len(daily[key]) < forecast_count for key in ("temperature_2m_min", "temperature_2m_max", "precipitation_probability_max", "weather_code")):
+            raise ValueError("incomplete forecast arrays")
+        forecast = [
+            WeatherForecastDay(
+                date=str(daily["time"][index]), minimum_c=float(daily["temperature_2m_min"][index]),
+                maximum_c=float(daily["temperature_2m_max"][index]),
+                precipitation_probability_percent=float(daily["precipitation_probability_max"][index]),
+                weather_code=int(daily["weather_code"][index]), condition=_weather_condition(int(daily["weather_code"][index])),
+            )
+            for index in range(forecast_count)
+        ]
+    except Exception as exc:
+        if isinstance(exc, (HTTPError, URLError, TimeoutError, socket.timeout, OSError)):
+            raise _weather_http_error("forecast", exc)
+        logger.warning("Weather provider failure: stage=forecast kind=malformed_response detail=%s", _weather_safe_detail(str(exc)))
+        raise HTTPException(502, "Weather provider returned an invalid response. Try again shortly.")
+    return WeatherResponse(
+        available=True, location=place,
+        summary=f"{current.condition} · {current.temperature_c:g} °C · precipitation {current.precipitation_mm:g} mm · wind {current.wind_speed_kmh:g} km/h",
+        guidance=["Review site-specific limits for lifting, work at height and other weather-sensitive tasks."],
+        current=current, forecast=forecast,
+    )

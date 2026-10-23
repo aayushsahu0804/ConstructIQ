@@ -5,12 +5,13 @@ A fresh React + Vite and FastAPI MVP for field observations, preliminary constru
 ## Features
 
 - Gemini multimodal image analysis for visible site safety observations and crack patterns. Provider results are schema validated. With no key configured, image analysis clearly returns unavailable instead of generating a fake result.
-- Deterministic early-stage INR estimate, editable project inputs and material quantities, cost breakdown, schedule and resource plan.
+- Deterministic indicative INR estimate with area, city tier, property tier and structure type inputs; editable material quantities, cost breakdown, schedule and resource plan.
 - Construction assistant and daily report template. Offline guidance is labeled; Gemini answers require a configured key.
-- Open-Meteo current conditions endpoint for valid coordinates. Weather is reported unavailable when coordinates or service are unavailable.
+- Open-Meteo geocoding, current conditions and a three-day forecast for a user-entered location (or coordinates). Weather is reported unavailable when the location or provider cannot be resolved.
+- General capability overview, persisted light/dark theme preference, browser printing, and JSON export for structured safety/crack assessments.
 - CORS configured through environment variables and strict Pydantic response models.
 
-AI visual observations do not verify compliance or replace site inspection. Crack dimensions are not inferred from ordinary photos without a scale. All costs are estimates, not professional valuations or quotations.
+AI visual observations do not verify compliance or replace site inspection. Crack dimensions are not inferred from ordinary photos without a scale. Planning figures use transparent broad tier factors and are indicative estimates, not professional valuations or quotations.
 
 ## Local setup (PowerShell)
 
