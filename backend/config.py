@@ -29,7 +29,7 @@ def gemini_model() -> str:
 
 
 def gemini_fallback_model() -> str:
-    return os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
+    return os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 
 
 def gemini_timeout_seconds() -> float:

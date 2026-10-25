@@ -208,12 +208,13 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
     try:
         response = _gemini_model_request(primary, payload, key, image or b"", primary_deadline)
     except HTTPError as exc:
-        if exc.code != 503 or primary == fallback:
+        if exc.code not in {429, 503} or primary == fallback:
             raise
         if deadline - time.monotonic() < 5.0:
             logger.warning("Gemini fallback skipped: model=%s reason=insufficient overall budget", fallback)
             raise
-        logger.warning("Gemini fallback starting: model=%s reason=primary HTTP 503 after retries", fallback)
+        reason = "primary quota exhausted (HTTP 429)" if exc.code == 429 else "primary HTTP 503 after retries"
+        logger.warning("Gemini fallback starting: model=%s reason=%s", fallback, reason)
         selected_model = fallback
         response = _gemini_model_request(fallback, payload, key, image or b"", deadline)
     except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:

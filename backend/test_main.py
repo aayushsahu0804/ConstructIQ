@@ -183,7 +183,7 @@ def test_gemini_request_uses_supported_model_auth_and_image_payload(monkeypatch)
     secret = 'test-only-key-do-not-log'
     monkeypatch.setattr(main, 'gemini_api_key', lambda: secret)
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    observed = {}
+    observed = {'calls': 0}
 
     class FakeResponse:
         def __enter__(self): return self
@@ -191,6 +191,7 @@ def test_gemini_request_uses_supported_model_auth_and_image_payload(monkeypatch)
         def read(self): return b'{"candidates":[{"content":{"parts":[{"text":"{}"}]}}]}'
 
     def fake_urlopen(request, timeout):
+        observed['calls'] += 1
         observed['url'] = request.full_url
         observed['auth'] = request.get_header('X-goog-api-key')
         observed['payload'] = json.loads(request.data)
@@ -206,6 +207,7 @@ def test_gemini_request_uses_supported_model_auth_and_image_payload(monkeypatch)
     assert parts[1]['inline_data'] == {'mime_type': 'image/png', 'data': base64.b64encode(b'image-bytes').decode()}
     assert observed['payload']['generationConfig'] == {'responseMimeType': 'application/json'}
     assert observed['timeout'] == 30
+    assert observed['calls'] == 1  # Primary success does not invoke fallback.
 
 def test_gemini_timeout_is_configurable_and_bounded(monkeypatch):
     monkeypatch.setenv('GEMINI_TIMEOUT_SECONDS', '72.5')
@@ -227,7 +229,7 @@ def test_gemini_models_have_configurable_defaults(monkeypatch):
     monkeypatch.delenv('GEMINI_MODEL', raising=False)
     monkeypatch.delenv('GEMINI_FALLBACK_MODEL', raising=False)
     assert main.gemini_model() == 'gemini-3.8-flash'
-    assert gemini_fallback_model() == 'gemini-3.6-flash'
+    assert gemini_fallback_model() == 'gemini-3.5-flash-lite'
     monkeypatch.setenv('GEMINI_MODEL', 'primary-test-model')
     monkeypatch.setenv('GEMINI_FALLBACK_MODEL', 'fallback-test-model')
     assert main.gemini_model() == 'primary-test-model'
@@ -243,7 +245,7 @@ def _gemini_response_text(text):
 def test_gemini_retries_transient_errors_then_succeeds(monkeypatch, caplog):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.6-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
     monkeypatch.setattr(main.time, 'sleep', lambda _delay: None)
     monkeypatch.setattr(main.random, 'uniform', lambda _low, _high: 0)
     attempts = []
@@ -271,10 +273,10 @@ def test_gemini_retries_transient_errors_then_succeeds(monkeypatch, caplog):
 def test_gemini_falls_back_after_primary_503_and_validates_schema(monkeypatch, caplog):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.6-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
     monkeypatch.setattr(main.time, 'sleep', lambda _delay: None)
     monkeypatch.setattr(main.random, 'uniform', lambda _low, _high: 0)
-    calls = {'gemini-3.8-flash': 0, 'gemini-3.6-flash': 0}
+    calls = {'gemini-3.8-flash': 0, 'gemini-3.5-flash-lite': 0}
     result = {'summary': 'Visible observation only', 'findings': [{'title': 'Missing visible hard hat', 'detail': 'One worker appears without head protection.', 'severity': 'medium', 'confidence': 0.72, 'action': 'Verify PPE on site and provide required head protection.'}], 'limitations': []}
 
     class FakeResponse:
@@ -283,7 +285,7 @@ def test_gemini_falls_back_after_primary_503_and_validates_schema(monkeypatch, c
         def read(self): return _gemini_response_text(json.dumps(result))
 
     def fake_urlopen(request, timeout):
-        model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.6-flash'
+        model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.5-flash-lite'
         calls[model] += 1
         if model == 'gemini-3.8-flash':
             raise _http_error(request, 503, 'UNAVAILABLE')
@@ -297,19 +299,49 @@ def test_gemini_falls_back_after_primary_503_and_validates_schema(monkeypatch, c
     assert response.json()['provider'] == 'Gemini'
     assert response.json()['findings'][0]['title'] == result['findings'][0]['title']
     assert response.json()['mode'] == 'safety'
-    assert calls == {'gemini-3.8-flash': 3, 'gemini-3.6-flash': 1}
-    assert 'Gemini fallback starting: model=gemini-3.6-flash reason=primary HTTP 503 after retries' in caplog.text
+    assert calls == {'gemini-3.8-flash': 3, 'gemini-3.5-flash-lite': 1}
+    assert 'Gemini fallback starting: model=gemini-3.5-flash-lite reason=primary HTTP 503 after retries' in caplog.text
+
+def test_gemini_falls_back_after_primary_429_quota_error(monkeypatch, caplog):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
+    calls = []
+    result = {'summary': 'Visible observation only', 'findings': [], 'limitations': []}
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return _gemini_response_text(json.dumps(result))
+
+    def fake_urlopen(request, timeout):
+        model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.5-flash-lite'
+        calls.append(model)
+        if model == 'gemini-3.8-flash':
+            raise _http_error(request, 429, 'RESOURCE_EXHAUSTED')
+        return FakeResponse()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', fake_urlopen)
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=crack', files={'image': ('crack.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 200
+    assert response.json()['provider'] == 'Gemini'
+    assert response.json()['mode'] == 'crack'
+    assert response.json()['summary'] == result['summary']
+    assert calls == ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
+    assert 'reason=primary quota exhausted (HTTP 429)' in caplog.text
 
 def test_gemini_fails_when_primary_and_fallback_are_unavailable(monkeypatch):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.6-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
     monkeypatch.setattr(main.time, 'sleep', lambda _delay: None)
     monkeypatch.setattr(main.random, 'uniform', lambda _low, _high: 0)
-    calls = {'gemini-3.8-flash': 0, 'gemini-3.6-flash': 0}
+    calls = {'gemini-3.8-flash': 0, 'gemini-3.5-flash-lite': 0}
 
     def fake_urlopen(request, timeout):
-        model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.6-flash'
+        model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.5-flash-lite'
         calls[model] += 1
         raise _http_error(request, 503, 'UNAVAILABLE')
 
@@ -318,13 +350,13 @@ def test_gemini_fails_when_primary_and_fallback_are_unavailable(monkeypatch):
 
     assert response.status_code == 502
     assert response.json()['detail'] == 'AI provider error or invalid response'
-    assert calls == {'gemini-3.8-flash': 3, 'gemini-3.6-flash': 3}
+    assert calls == {'gemini-3.8-flash': 3, 'gemini-3.5-flash-lite': 3}
 
-@pytest.mark.parametrize('status', [400, 401, 403, 429])
+@pytest.mark.parametrize('status', [400, 401, 403])
 def test_gemini_does_not_retry_or_fallback_for_nontransient_http_errors(monkeypatch, status):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.6-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
     calls = []
 
     def fake_urlopen(request, timeout):
@@ -358,7 +390,7 @@ def test_analyze_timeout_returns_generic_error_and_logs_safe_timeout(monkeypatch
     assert response.status_code == 502
     assert response.json()['detail'] == 'AI provider error or invalid response'
     assert 'model=gemini-3.8-flash attempt=1 timeout_seconds=30.00 reason=provider socket timeout' in caplog.text
-    assert 'model=gemini-3.6-flash attempt=1 timeout_seconds=30.00' in caplog.text
+    assert 'model=gemini-3.5-flash-lite attempt=1 timeout_seconds=30.00' in caplog.text
     assert secret not in caplog.text
     assert 'example.test' not in caplog.text
     assert image_bytes.decode() not in caplog.text
@@ -366,7 +398,7 @@ def test_analyze_timeout_returns_generic_error_and_logs_safe_timeout(monkeypatch
 def test_primary_timeout_uses_fallback_and_returns_valid_analysis(monkeypatch, caplog):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.6-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
     monkeypatch.setattr(main, 'gemini_timeout_seconds', lambda: 60)
     monkeypatch.setattr(main, 'gemini_attempt_timeout_seconds', lambda: 30)
     result = {'summary': 'Visible observation', 'findings': [], 'limitations': []}
@@ -378,7 +410,7 @@ def test_primary_timeout_uses_fallback_and_returns_valid_analysis(monkeypatch, c
         def read(self): return _gemini_response_text(json.dumps(result))
 
     def fake_urlopen(request, timeout):
-        calls.append(('gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.6-flash', timeout))
+        calls.append(('gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.5-flash-lite', timeout))
         if len(calls) == 1:
             raise TimeoutError('provider socket timeout')
         return FakeResponse()
@@ -389,16 +421,16 @@ def test_primary_timeout_uses_fallback_and_returns_valid_analysis(monkeypatch, c
 
     assert response.status_code == 200
     assert response.json()['summary'] == result['summary']
-    assert [model for model, _timeout in calls] == ['gemini-3.8-flash', 'gemini-3.6-flash']
+    assert [model for model, _timeout in calls] == ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
     assert calls[0][1] == 30
     assert calls[1][1] <= 30
     assert 'model=gemini-3.8-flash attempt=1 timeout_seconds=30.00 reason=provider socket timeout' in caplog.text
-    assert 'model=gemini-3.6-flash reason=primary timeout' in caplog.text
+    assert 'model=gemini-3.5-flash-lite reason=primary timeout' in caplog.text
 
 def test_both_models_timeout_return_generic_error(monkeypatch, caplog):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.6-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
     monkeypatch.setattr(main, 'gemini_timeout_seconds', lambda: 60)
     monkeypatch.setattr(main, 'gemini_attempt_timeout_seconds', lambda: 30)
     calls = []
@@ -415,12 +447,12 @@ def test_both_models_timeout_return_generic_error(monkeypatch, caplog):
     assert response.json()['detail'] == 'AI provider error or invalid response'
     assert len(calls) == 2
     assert 'model=gemini-3.8-flash attempt=1 timeout_seconds=30.00' in caplog.text
-    assert 'model=gemini-3.6-flash attempt=1 timeout_seconds=30.00' in caplog.text
+    assert 'model=gemini-3.5-flash-lite attempt=1 timeout_seconds=30.00' in caplog.text
 
 def test_primary_timeout_skips_fallback_when_overall_budget_is_exhausted(monkeypatch, caplog):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
-    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.6-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
     monkeypatch.setattr(main, 'gemini_timeout_seconds', lambda: 20)
     monkeypatch.setattr(main, 'gemini_attempt_timeout_seconds', lambda: 5)
     now = [0.0]
