@@ -250,7 +250,18 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
     response = _gemini_model_request(model, payload, key, image or b"", deadline)
     selected_model = model
     try:
-        return json.loads(response)["candidates"][0]["content"]["parts"][0]["text"]
+        rest_response = json.loads(response)
+        parts = rest_response["candidates"][0]["content"]["parts"]
+        answer_text = "".join(
+            part["text"]
+            for part in parts
+            if isinstance(part, dict)
+            and part.get("thought") is not True
+            and isinstance(part.get("text"), str)
+        )
+        if not answer_text:
+            raise ValueError("Gemini response did not contain answer text")
+        return answer_text
     except Exception as exc:
         _log_provider_exception(exc, key, image or b"")
         logger.warning("Gemini response parsing failed: model=%s", selected_model)

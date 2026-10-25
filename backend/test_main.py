@@ -272,7 +272,7 @@ def test_gemini_retries_transient_errors_then_succeeds(monkeypatch, caplog):
     assert 'status=500 retry_count=0' in caplog.text
     assert 'status=503 retry_count=1' in caplog.text
 
-def test_analyze_parses_standard_gemini_rest_response_with_selected_model(monkeypatch):
+def test_analyze_parses_standard_gemini_rest_response_parts_with_selected_model(monkeypatch):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
     result = {
@@ -296,7 +296,17 @@ def test_analyze_parses_standard_gemini_rest_response_with_selected_model(monkey
                 'candidates': [{
                     'content': {
                         'role': 'model',
-                        'parts': [{'text': json.dumps(result)}],
+                        'parts': [
+                            {
+                                'text': json.dumps({'internal_note': 'not the final report'}),
+                                'thought': True,
+                                'thoughtSignature': 'test-only-signature',
+                            },
+                            {
+                                'text': json.dumps(result),
+                                'thoughtSignature': 'test-only-signature',
+                            },
+                        ],
                     },
                     'finishReason': 'STOP',
                 }],
