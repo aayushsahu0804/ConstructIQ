@@ -6,9 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from urllib.error import HTTPError, URLError
 if __package__:  # `uvicorn backend.main:app` from project root.
-    from .config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_fallback_model, gemini_model, gemini_timeout_seconds
+    from .config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_model, gemini_timeout_seconds
 else:  # `uvicorn main:app` from backend/.
-    from config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_fallback_model, gemini_model, gemini_timeout_seconds
+    from config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_model, gemini_timeout_seconds
 
 app = FastAPI(title="Multimodal Construction Intelligence Platform", version="1.0.0")
 logger = logging.getLogger("uvicorn.error")
@@ -243,33 +243,12 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
         },
     }
     timeout_budget = gemini_timeout_seconds()
-    started_at = time.monotonic()
-    deadline = started_at + timeout_budget
-    primary_deadline = started_at + timeout_budget / 2
-    primary = gemini_model()
-    fallback = gemini_fallback_model()
-    selected_model = primary
-    try:
-        response = _gemini_model_request(primary, payload, key, image or b"", primary_deadline)
-    except HTTPError as exc:
-        if exc.code not in {429, 503} or primary == fallback:
-            raise
-        if deadline - time.monotonic() < 5.0:
-            logger.warning("Gemini fallback skipped: model=%s reason=insufficient overall budget", fallback)
-            raise
-        reason = "primary quota exhausted (HTTP 429)" if exc.code == 429 else "primary HTTP 503 after retries"
-        logger.warning("Gemini fallback starting: model=%s reason=%s", fallback, reason)
-        selected_model = fallback
-        response = _gemini_model_request(fallback, payload, key, image or b"", deadline)
-    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
-        if not _is_timeout_error(exc) or primary == fallback:
-            raise
-        if deadline - time.monotonic() < 5.0:
-            logger.warning("Gemini fallback skipped: model=%s reason=insufficient overall budget after primary timeout", fallback)
-            raise
-        logger.warning("Gemini fallback starting: model=%s reason=primary timeout", fallback)
-        selected_model = fallback
-        response = _gemini_model_request(fallback, payload, key, image or b"", deadline)
+    deadline = time.monotonic() + timeout_budget
+    model = gemini_model()
+    # Use only the configured primary model; bounded retries, when applicable,
+    # stay on this same model.
+    response = _gemini_model_request(model, payload, key, image or b"", deadline)
+    selected_model = model
     try:
         return json.loads(response)["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as exc:

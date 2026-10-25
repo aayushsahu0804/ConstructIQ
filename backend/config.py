@@ -25,11 +25,7 @@ def gemini_api_key() -> str | None:
 
 
 def gemini_model() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-
-
-def gemini_fallback_model() -> str:
-    return os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
+    return os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 
 def gemini_timeout_seconds() -> float:
