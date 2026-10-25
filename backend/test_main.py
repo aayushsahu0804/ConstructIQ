@@ -205,7 +205,10 @@ def test_gemini_request_uses_supported_model_auth_and_image_payload(monkeypatch)
     assert observed['auth'] == secret
     parts = observed['payload']['contents'][0]['parts']
     assert parts[1]['inline_data'] == {'mime_type': 'image/png', 'data': base64.b64encode(b'image-bytes').decode()}
-    assert observed['payload']['generationConfig'] == {'responseMimeType': 'application/json'}
+    assert observed['payload']['generationConfig'] == {
+        'responseMimeType': 'application/json',
+        'responseJsonSchema': main.GEMINI_IMAGE_ANALYSIS_SCHEMA,
+    }
     assert observed['timeout'] == 30
     assert observed['calls'] == 1  # Primary success does not invoke fallback.
 
@@ -287,6 +290,8 @@ def test_gemini_falls_back_after_primary_503_and_validates_schema(monkeypatch, c
     def fake_urlopen(request, timeout):
         model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.5-flash-lite'
         calls[model] += 1
+        payload = json.loads(request.data)
+        assert payload['generationConfig']['responseJsonSchema'] == main.GEMINI_IMAGE_ANALYSIS_SCHEMA
         if model == 'gemini-3.8-flash':
             raise _http_error(request, 503, 'UNAVAILABLE')
         return FakeResponse()
@@ -301,6 +306,36 @@ def test_gemini_falls_back_after_primary_503_and_validates_schema(monkeypatch, c
     assert response.json()['mode'] == 'safety'
     assert calls == {'gemini-3.8-flash': 3, 'gemini-3.5-flash-lite': 1}
     assert 'Gemini fallback starting: model=gemini-3.5-flash-lite reason=primary HTTP 503 after retries' in caplog.text
+
+def test_analyze_rejects_provider_json_that_violates_response_schema(monkeypatch, caplog):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
+    invalid_result = {
+        'summary': 'Potential hazard observed',
+        'findings': [{
+            'title': 'Unprotected edge', 'detail': 'An edge appears unguarded.',
+            'severity': 'critical', 'confidence': 0.8,
+            'action': 'Restrict access and arrange inspection.',
+        }],
+        'limitations': [],
+    }
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            text = json.dumps(invalid_result)
+            return _gemini_response_text(text)
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 502
+    assert response.json()['detail'] == 'AI provider error or invalid response'
+    assert 'exception_type=ValidationError' in caplog.text
+    assert 'response schema validation failed (findings.0.severity:literal_error)' in caplog.text
+    assert 'critical' not in caplog.text
 
 def test_gemini_falls_back_after_primary_429_quota_error(monkeypatch, caplog):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')

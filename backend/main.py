@@ -3,7 +3,7 @@ import base64, json, logging, os, random, re, socket, time, urllib.parse, urllib
 from typing import Literal
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from urllib.error import HTTPError, URLError
 if __package__:  # `uvicorn backend.main:app` from project root.
     from .config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_fallback_model, gemini_model, gemini_timeout_seconds
@@ -30,6 +30,32 @@ class ImageAnalysis(StrictModel):
     summary: str
     findings: list[Finding]
     limitations: list[str]
+
+# Keep Gemini output aligned with the Pydantic response contract.
+GEMINI_IMAGE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "action": {"type": "string"},
+                },
+                "required": ["title", "detail", "severity", "confidence", "action"],
+                "additionalProperties": False,
+            },
+        },
+        "limitations": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "findings", "limitations"],
+    "additionalProperties": False,
+}
 class Material(StrictModel):
     name: str
     quantity: float = Field(ge=0, le=100000000)
@@ -131,6 +157,14 @@ def _log_provider_exception(exc: Exception, api_key: str, image_bytes: bytes = b
     """Log a useful exception category and a conservative safe message."""
     if isinstance(exc, json.JSONDecodeError):
         message = f"invalid JSON at line {exc.lineno}, column {exc.colno}"
+    elif isinstance(exc, ValidationError):
+        errors = exc.errors(include_input=False, include_context=False)
+        safe_fields = []
+        for error in errors[:8]:
+            location = ".".join(str(part) for part in error.get("loc", ())) or "<root>"
+            error_type = str(error.get("type", "validation_error"))
+            safe_fields.append(_sanitize_log_text(f"{location}:{error_type}", api_key, image_bytes))
+        message = "response schema validation failed" + (f" ({'; '.join(safe_fields)})" if safe_fields else "")
     elif isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout)):
         message = f"Gemini request timed out after {gemini_timeout_seconds():g} seconds"
     elif isinstance(exc, urllib.error.URLError):
@@ -197,7 +231,13 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
     parts = [{"text": prompt}]
     if image: parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(image).decode()}})
     # Gemini 3.x rejects legacy sampling parameters such as temperature.
-    payload = {"contents": [{"parts": parts}], "generationConfig": {"responseMimeType": "application/json"}}
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": GEMINI_IMAGE_ANALYSIS_SCHEMA,
+        },
+    }
     timeout_budget = gemini_timeout_seconds()
     started_at = time.monotonic()
     deadline = started_at + timeout_budget
