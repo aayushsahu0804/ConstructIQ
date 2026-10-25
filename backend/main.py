@@ -1,5 +1,5 @@
 from __future__ import annotations
-import base64, json, logging, os, random, re, socket, time, urllib.parse, urllib.request
+import base64, json, logging, os, random, re, socket, ssl, time, urllib.parse, urllib.request
 from typing import Literal
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,11 +12,25 @@ else:  # `uvicorn main:app` from backend/.
 
 app = FastAPI(title="Multimodal Construction Intelligence Platform", version="1.0.0")
 logger = logging.getLogger("uvicorn.error")
-origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if x.strip()]
+
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "https://construct-iq-eight.vercel.app",
+]
+env_origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()]
+origins = list(dict.fromkeys(DEFAULT_ALLOWED_ORIGINS + env_origins))
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+class PPEItem(StrictModel):
+    item: str
+    status: Literal["observed", "not_observed", "not_assessable"]
+    explanation: str
 
 class Finding(StrictModel):
     title: str
@@ -24,12 +38,18 @@ class Finding(StrictModel):
     severity: Literal["low", "medium", "high"]
     confidence: float = Field(ge=0, le=1)
     action: str
+    location: str | None = None
+    risk_explanation: str | None = None
+
 class ImageAnalysis(StrictModel):
     mode: Literal["safety", "crack"]
     provider: str
     summary: str
     findings: list[Finding]
     limitations: list[str]
+    safety_score: int | None = None
+    ppe_checklist: list[PPEItem] | None = None
+    prioritized_actions: list[str] | None = None
 
 # Keep Gemini output aligned with the Pydantic response contract.
 GEMINI_IMAGE_ANALYSIS_SCHEMA = {
@@ -46,8 +66,23 @@ GEMINI_IMAGE_ANALYSIS_SCHEMA = {
                     "severity": {"type": "string", "enum": ["low", "medium", "high"]},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "action": {"type": "string"},
+                    "location": {"type": "string"},
+                    "risk_explanation": {"type": "string"},
                 },
                 "required": ["title", "detail", "severity", "confidence", "action"],
+                "additionalProperties": False,
+            },
+        },
+        "ppe_evaluations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string"},
+                    "status": {"type": "string", "enum": ["observed", "not_observed", "not_assessable"]},
+                    "explanation": {"type": "string"},
+                },
+                "required": ["item", "status", "explanation"],
                 "additionalProperties": False,
             },
         },
@@ -79,13 +114,25 @@ class PlanResponse(StrictModel):
     assumptions: list[str]
     tasks: list[dict[str, str]]
     summary: str
+class SiteContext(StrictModel):
+    activity: str | None = None
+    labour_count: int | None = Field(default=None, ge=0, le=10000)
+    site_condition: str | None = None
+    location: str | None = None
+    weather_summary: str | None = None
+    work_timing: str | None = None
+    notes: str | None = None
+
 class AssistantRequest(StrictModel):
     message: str = Field(min_length=1, max_length=4000)
-    kind: Literal["chat", "daily_report"] = "chat"
+    kind: Literal["chat", "daily_report", "context_query"] = "chat"
+    site_context: SiteContext | None = None
+
 class AssistantResponse(StrictModel):
     provider: str
     answer: str
     guidance: list[str]
+    context_summary: str | None = None
 class WeatherCurrent(StrictModel):
     observed_at: str
     temperature_c: float
@@ -337,12 +384,138 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
         logger.warning("Gemini response parsing failed: model=%s", selected_model)
         raise
 
+def compute_safety_score(findings: list[Finding], ppe_items: list[PPEItem]) -> int | None:
+    """
+    Documented, deterministic scoring method based on identified hazards, severity, and PPE evidence:
+    - Base score: 100 points represents an ideal site observation.
+    - High severity hazard: -18 points (scaled by confidence, min 12 points).
+    - Medium severity hazard: -10 points (scaled by confidence, min 6 points).
+    - Low severity hazard: -4 points (scaled by confidence, min 2 points).
+    - PPE checklist: -10 points for each essential category marked 'not_observed'.
+    - Safety ceiling: score capped at 65 if any high-severity hazard exists, max 40 if 3+ high hazards.
+    - Normalized strictly to the range 5..100.
+    - Returns None only if no assessable findings or PPE data exist.
+    """
+    if not findings and not ppe_items:
+        return None
+    score = 100.0
+    high_count = 0
+    for f in findings:
+        conf = max(0.5, min(1.0, float(f.confidence if f.confidence is not None else 0.8)))
+        if f.severity == "high":
+            high_count += 1
+            score -= max(12.0, 18.0 * conf)
+        elif f.severity == "medium":
+            score -= max(6.0, 10.0 * conf)
+        elif f.severity == "low":
+            score -= max(2.0, 4.0 * conf)
+
+    # High severity hazards cap the site baseline
+    if high_count >= 3:
+        score = min(score, 40.0)
+    elif high_count >= 1:
+        score = min(score, 65.0)
+
+    for ppe in ppe_items:
+        if ppe.status == "not_observed":
+            score -= 10.0
+
+    return max(5, min(100, round(score)))
+
+def build_ppe_checklist(raw_evaluations: list | None, findings: list[Finding]) -> list[PPEItem]:
+    """
+    Build evidence-based PPE checklist for the 4 core categories:
+    - Hard hats
+    - High-visibility vests
+    - Safety footwear
+    - Fall-arrest/restraint equipment
+    """
+    categories = [
+        ("Hard hats", ["hard hat", "helmet", "head protection"]),
+        ("High-visibility vests", ["hi-vis", "vest", "reflective", "visibility"]),
+        ("Safety footwear", ["boot", "footwear", "shoe"]),
+        ("Fall-arrest/restraint equipment", ["fall", "harness", "lanyard", "scaffold", "guardrail", "edge", "height"]),
+    ]
+
+    provided_map = {}
+    if isinstance(raw_evaluations, list):
+        for raw in raw_evaluations:
+            if isinstance(raw, dict) and "item" in raw and "status" in raw:
+                item_name = str(raw.get("item", "")).strip().lower()
+                status = str(raw.get("status", "")).strip().lower()
+                if status in {"observed", "not_observed", "not_assessable"}:
+                    explanation = str(raw.get("explanation", "")).strip() or "Evaluated from visible site photograph."
+                    provided_map[item_name] = (status, explanation)
+
+    findings_text = " ".join(f"{f.title} {f.detail} {f.action}".lower() for f in findings)
+
+    checklist: list[PPEItem] = []
+    for cat_name, keywords in categories:
+        cat_lower = cat_name.lower()
+        matched = False
+        for p_name, (st, exp) in provided_map.items():
+            if any(k in p_name for k in keywords) or p_name in cat_lower or cat_lower in p_name:
+                checklist.append(PPEItem(item=cat_name, status=st, explanation=exp))
+                matched = True
+                break
+        if not matched:
+            has_defect = any(k in findings_text for k in keywords)
+            if has_defect and any(word in findings_text for word in ["missing", "lack", "without", "unprotected", "no "]):
+                checklist.append(PPEItem(
+                    item=cat_name,
+                    status="not_observed",
+                    explanation=f"Visible deficiency or risk related to {cat_name.lower()} indicated in observed site hazards.",
+                ))
+            else:
+                checklist.append(PPEItem(
+                    item=cat_name,
+                    status="not_assessable",
+                    explanation="Not assessable or workers/equipment not clearly discernable from this camera perspective.",
+                ))
+
+    return checklist
+
+def build_prioritized_actions(findings: list[Finding]) -> list[str]:
+    """Distinguish urgent immediate precautions from routine improvements."""
+    urgent = []
+    routine = []
+    for f in findings:
+        act = f.action.strip()
+        if not act:
+            continue
+        if f.severity == "high":
+            urgent.append(f"Immediate: {act}")
+        elif f.severity == "medium":
+            urgent.append(f"Priority: {act}")
+        else:
+            routine.append(f"Routine: {act}")
+    actions = urgent + routine
+    if not actions:
+        actions.append("Conduct scheduled periodic safety inspection with qualified site supervisor.")
+    actions.append("Observations are visual only; verify compliance with the responsible safety professional.")
+    return actions
+
 @app.post("/api/analyze", response_model=ImageAnalysis)
 async def analyze(mode: Literal["safety", "crack"], image: UploadFile = File(...)):
     data = await image.read()
     if not image.content_type or not image.content_type.startswith("image/"): raise HTTPException(415, "Upload an image file")
     if len(data) > 12 * 1024 * 1024: raise HTTPException(413, "Image must be 12 MB or smaller")
-    instruction = ("Review this construction site photo for visibly observable PPE and hazards. Do not infer hidden facts. Return JSON with summary, findings array of title,detail,severity(low|medium|high),confidence(0..1),action, limitations array. State observations are not verified compliance." if mode == "safety" else "Describe the visible crack pattern, cautious severity and possible causes, and inspection/remediation steps. Never infer precise dimensions without scale. Return JSON summary, findings array(title,detail,severity low|medium|high,confidence 0..1,action),limitations array.")
+    instruction = (
+        "You are an expert construction site safety auditor reviewing this site photograph. "
+        "Evaluate visible evidence only; do not infer hidden facts. "
+        "Return JSON with: "
+        "1. summary: concise construction-specific summary of observed site conditions and main visible risks. "
+        "2. findings: array of visible hazards, each with title, detail (visible evidence and location), "
+        "severity (low|medium|high), confidence (0..1), action (recommended corrective action), "
+        "location (visible location on site), and risk_explanation (potential risk / consequence). "
+        "3. ppe_evaluations: array for the 4 core PPE items (Hard hats, High-visibility vests, Safety footwear, Fall-arrest/restraint equipment), "
+        "each with item, status ('observed', 'not_observed', or 'not_assessable'), and explanation "
+        "(if workers are not visible, use 'not_assessable' with clear explanation; do not label noncompliant if workers are absent). "
+        "4. limitations: array of visual observation caveats."
+        if mode == "safety" else
+        "Describe the visible crack pattern, cautious severity and possible causes, and inspection/remediation steps. "
+        "Never infer precise dimensions without scale. Return JSON summary, findings array(title,detail,severity low|medium|high,confidence 0..1,action),limitations array."
+    )
     try:
         raw_text = gemini(instruction, data, image.content_type)
         parsed = json.loads(raw_text)
@@ -350,15 +523,41 @@ async def analyze(mode: Literal["safety", "crack"], image: UploadFile = File(...
             raise ValueError("Gemini response is not a JSON object")
         raw_limitations = parsed.get("limitations")
         limitations = [str(x) for x in raw_limitations] if isinstance(raw_limitations, list) else []
-        if mode == "safety": limitations.append("Visual observations only; PPE compliance is not verified.")
-        if mode == "crack": limitations.append("No precise crack dimensions can be inferred without a scale reference.")
-        return ImageAnalysis(
+
+        if mode == "safety":
+            limitations.append("Visual observations only; PPE compliance is not verified.")
+        else:
+            limitations.append("No precise crack dimensions can be inferred without a scale reference.")
+
+        raw_findings = parsed.get("findings")
+
+        # Validate findings structure through ImageAnalysis
+        initial_analysis = ImageAnalysis(
             mode=mode,
             provider="Gemini",
             summary=parsed.get("summary"),
-            findings=parsed.get("findings"),
+            findings=raw_findings,
             limitations=limitations,
         )
+
+        if mode == "safety":
+            severity_order = {"high": 0, "medium": 1, "low": 2}
+            sorted_findings = sorted(initial_analysis.findings, key=lambda f: severity_order.get(f.severity, 99))
+            ppe_checklist = build_ppe_checklist(parsed.get("ppe_evaluations"), sorted_findings)
+            safety_score = compute_safety_score(sorted_findings, ppe_checklist)
+            prioritized_actions = build_prioritized_actions(sorted_findings)
+            return ImageAnalysis(
+                mode=mode,
+                provider="Gemini",
+                summary=parsed["summary"],
+                findings=sorted_findings,
+                limitations=limitations,
+                safety_score=safety_score,
+                ppe_checklist=ppe_checklist,
+                prioritized_actions=prioritized_actions,
+            )
+        else:
+            return initial_analysis
     except RuntimeError:
         raise HTTPException(503, "AI analysis unavailable: configure GEMINI_API_KEY. No demo result was generated.")
     except Exception as e:
@@ -414,18 +613,99 @@ def plan(req: PlanRequest):
         ],
         summary=f"Indicative benchmark estimate for {req.area_sqft:,.0f} sq ft; confirm specifications, quantities and local rates before commitment.",
     )
+
 @app.post("/api/assistant", response_model=AssistantResponse)
 def assistant(req: AssistantRequest):
+    context_lines = []
+    if req.site_context:
+        ctx = req.site_context
+        if ctx.activity: context_lines.append(f"Planned Activity: {ctx.activity}")
+        if ctx.labour_count is not None: context_lines.append(f"Workforce Count: {ctx.labour_count} workers on site")
+        if ctx.site_condition: context_lines.append(f"Ground & Site Conditions: {ctx.site_condition}")
+        if ctx.location: context_lines.append(f"Site Location: {ctx.location}")
+        if ctx.weather_summary: context_lines.append(f"Weather Context: {ctx.weather_summary}")
+        if ctx.work_timing: context_lines.append(f"Work Shift / Timing: {ctx.work_timing}")
+        if ctx.notes: context_lines.append(f"Site Notes & Constraints: {ctx.notes}")
+
+    context_summary = " · ".join(context_lines) if context_lines else None
+
     if gemini_api_key():
         try:
-            prompt = ("Prepare a concise daily construction site report using only supplied notes; flag missing details: " if req.kind == "daily_report" else "Answer cautiously; do not invent local regulations: ") + req.message
+            if req.kind == "daily_report":
+                prompt_prefix = "Prepare a concise, professional daily construction site progress and safety report using the provided site context and notes; clearly flag any missing details:\n"
+            else:
+                prompt_prefix = (
+                    "You are ConstructIQ's Senior Field Construction Assistant. "
+                    "Provide practical, context-aware engineering and safety guidance for the site query below. "
+                    "Directly address whether the planned activity is feasible under the reported conditions, "
+                    "potential slip/access/weather hazards, workforce coordination, safety/PPE checks, "
+                    "and conditions requiring work to pause or seek professional review. "
+                    "Structure your answer with clear section titles and actionable bullet points.\n"
+                )
+            context_block = f"\n[Site Context]\n" + "\n".join(f"- {line}" for line in context_lines) + "\n" if context_lines else ""
+            prompt = f"{prompt_prefix}{context_block}\n[User Query / Notes]\n{req.message}"
             answer = gemini(prompt)
-            try: answer = json.loads(answer).get("answer", answer)
-            except Exception: pass
-            return AssistantResponse(provider="Gemini", answer=str(answer), guidance=[])
-        except Exception: pass
-    if req.kind == "daily_report": return AssistantResponse(provider="Guided template", answer="Draft structure (fill only from site records):", guidance=["Date / site / verified weather", "Work completed and measured quantities", "Crew and equipment", "Deliveries and inspections", "Safety observations and corrective actions", "Delays and next shift plan"])
-    return AssistantResponse(provider="Offline guidance", answer="I can provide general construction guidance. Include project type, location and relevant dimensions for a more useful answer. This is not an engineering determination.", guidance=["For structural movement, isolate immediate hazards and consult a qualified local structural engineer.", "Confirm applicable local requirements with the responsible professional."])
+            try:
+                answer = json.loads(answer).get("answer", answer)
+            except Exception:
+                pass
+            guidance = [
+                "Decision support only; verify site conditions with the responsible project engineer.",
+                "Observations and guidelines do not replace local statutory building codes or health and safety regulations.",
+            ]
+            return AssistantResponse(
+                provider="Gemini",
+                answer=str(answer),
+                guidance=guidance,
+                context_summary=context_summary,
+            )
+        except Exception as exc:
+            logger.warning("Gemini assistant query failed: %s", type(exc).__name__)
+
+    # Fallback / Offline guidance
+    if req.kind == "daily_report":
+        guidance_items = [
+            "Date, location, and verified weather records",
+            "Work completed and measured quantities against milestone schedule",
+            f"Crew deployment ({req.site_context.labour_count if req.site_context and req.site_context.labour_count is not None else 'as recorded'}) and equipment operating hours",
+            "Deliveries, batch tickets, and quality inspections",
+            f"Safety observations, PPE compliance, and site ground state ({req.site_context.site_condition if req.site_context and req.site_context.site_condition else 'unspecified'})",
+            "Delays, weather disruptions, and next shift plan",
+        ]
+        answer_text = (
+            f"Daily Site Report Structure ({req.site_context.activity if req.site_context and req.site_context.activity else 'General Construction'})\n"
+            f"Location: {req.site_context.location if req.site_context and req.site_context.location else 'Site Records'}\n"
+            f"Conditions: {req.site_context.site_condition if req.site_context and req.site_context.site_condition else 'Standard'}\n"
+            f"Weather: {req.site_context.weather_summary if req.site_context and req.site_context.weather_summary else 'Refer to live weather advisor'}\n\n"
+            "Fill in site metrics from verified daily logs before supervisor sign-off."
+        )
+        return AssistantResponse(
+            provider="Guided template",
+            answer=answer_text,
+            guidance=guidance_items,
+            context_summary=context_summary,
+        )
+
+    # Context-aware offline answer
+    activity_desc = req.site_context.activity if req.site_context and req.site_context.activity else "General site work"
+    condition_desc = req.site_context.site_condition if req.site_context and req.site_context.site_condition else "reported conditions"
+    weather_desc = req.site_context.weather_summary if req.site_context and req.site_context.weather_summary else "applicable weather forecast"
+    offline_answer = (
+        f"Contextual Guidance for {activity_desc}:\n\n"
+        f"1. Ground & Environmental Precautions: Review work area stability and access routes under {condition_desc}. Verify {weather_desc} before undertaking exposed or moisture-sensitive tasks.\n"
+        f"2. Workforce Safety: Ensure all {req.site_context.labour_count if req.site_context and req.site_context.labour_count is not None else 'assigned'} workers are briefed on task sequencing, slip/trip prevention, and appropriate PPE.\n"
+        f"3. Quality & Material Protection: Protect freshly laid materials and sensitive components from weather exposure.\n"
+        f"4. Stop-Work Criteria: Halt operations immediately if lightning, extreme rain, high winds, or structural instability occur."
+    )
+    return AssistantResponse(
+        provider="Offline guidance",
+        answer=offline_answer,
+        guidance=[
+            "For critical operations, inspect immediate hazards and consult the site engineer.",
+            "Confirm applicable local safety regulations and manufacturer specifications.",
+        ],
+        context_summary=context_summary,
+    )
 
 def _weather_condition(code: int) -> str:
     conditions = {
@@ -442,10 +722,26 @@ def _weather_safe_detail(value: str) -> str:
     value = re.sub(r"(?i)(api[_-]?key|authorization|token)\s*[:=]\s*[^,\s\"']+", r"\1=[REDACTED]", value)
     return re.sub(r"[\r\n\t]+", " ", value)[:400]
 
-def _weather_json(url: str, stage: str) -> dict:
+def _weather_ssl_context() -> ssl.SSLContext:
     try:
-        with urllib.request.urlopen(url, timeout=8) as response:
-            payload = json.loads(response.read())
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception as exc:
+        logger.warning("Could not load certifi CA bundle, falling back to default SSL context: %s", exc)
+        return ssl.create_default_context()
+
+def _weather_json(url: str, stage: str) -> dict:
+    ctx = _weather_ssl_context()
+    try:
+        try:
+            with urllib.request.urlopen(url, timeout=8, context=ctx) as response:
+                payload = json.loads(response.read())
+        except TypeError as exc:
+            if "context" in str(exc):
+                with urllib.request.urlopen(url, timeout=8) as response:
+                    payload = json.loads(response.read())
+            else:
+                raise
     except HTTPError as exc:
         try:
             body = exc.read(1200).decode("utf-8", errors="replace")

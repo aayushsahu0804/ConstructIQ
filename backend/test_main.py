@@ -810,3 +810,361 @@ def test_log_provider_exception_non_standard_validation_error(caplog):
     assert 'stage=response_model' in caplog.text
     assert 'model=gemini-3.5-flash-lite' in caplog.text
     assert 'response schema validation failed (findings.0.severity:literal_error)' in caplog.text
+
+def test_safety_score_calculation_and_bounds():
+    from main import Finding, PPEItem, compute_safety_score
+
+    assert compute_safety_score([], []) is None
+
+    # Perfect site
+    ppe_all_observed = [
+        PPEItem(item="Hard hats", status="observed", explanation="All workers wearing helmets"),
+        PPEItem(item="High-visibility vests", status="observed", explanation="All workers wearing vests"),
+    ]
+    assert compute_safety_score([], ppe_all_observed) == 100
+
+    # Low severity finding
+    f_low = [Finding(title="Dust", detail="Minor dust", severity="low", confidence=0.8, action="Water spray")]
+    score_low = compute_safety_score(f_low, ppe_all_observed)
+    assert 94 <= score_low <= 98
+
+    # High severity finding capped at 65
+    f_high = [Finding(title="Unguarded edge", detail="No barrier", severity="high", confidence=0.9, action="Barricade")]
+    score_high = compute_safety_score(f_high, ppe_all_observed)
+    assert score_high <= 65
+
+    # Missing PPE drops score further
+    ppe_missing = [
+        PPEItem(item="Hard hats", status="not_observed", explanation="Workers missing helmets"),
+        PPEItem(item="High-visibility vests", status="not_observed", explanation="No vests visible"),
+    ]
+    score_high_missing_ppe = compute_safety_score(f_high, ppe_missing)
+    assert score_high_missing_ppe <= 45
+
+    # Multiple severe hazards capped at 40
+    f_many_high = [
+        Finding(title=f"Hazard {i}", detail="Severe risk", severity="high", confidence=0.95, action="Fix")
+        for i in range(4)
+    ]
+    score_severe = compute_safety_score(f_many_high, ppe_missing)
+    assert 5 <= score_severe <= 40
+
+def test_analyze_safety_audit_score_ppe_and_severity_sorting(monkeypatch):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+
+    raw_safety_result = {
+        'summary': 'Site safety observation shows active scaffolding and ground hazards.',
+        'findings': [
+            {
+                'title': 'Loose tools on walkway',
+                'detail': 'Hand tools lying in traffic area',
+                'severity': 'low',
+                'confidence': 0.75,
+                'action': 'Clean up walkway',
+            },
+            {
+                'title': 'Unprotected slab perimeter',
+                'detail': 'Second level slab lacks perimeter edge protection',
+                'severity': 'high',
+                'confidence': 0.92,
+                'action': 'Install rigid guardrails immediately',
+                'location': 'Level 2 perimeter',
+                'risk_explanation': 'Fall from height risk',
+            },
+            {
+                'title': 'Improper ladder angle',
+                'detail': 'Access ladder not secured at top',
+                'severity': 'medium',
+                'confidence': 0.85,
+                'action': 'Secure ladder top and verify 4:1 slope',
+            },
+        ],
+        'ppe_evaluations': [
+            {'item': 'Hard hats', 'status': 'observed', 'explanation': 'Visible workers wearing hard hats.'},
+            {'item': 'Fall-arrest/restraint equipment', 'status': 'not_observed', 'explanation': 'Work at height observed without harness or edge protection.'},
+        ],
+        'limitations': ['Visual observations only.'],
+    }
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{'content': {'parts': [{'text': json.dumps(raw_safety_result)}]}}],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data['mode'] == 'safety'
+    assert isinstance(data['safety_score'], int)
+    assert 0 <= data['safety_score'] <= 65  # capped due to high hazard
+    # Verify severity ordering: high -> medium -> low
+    severities = [f['severity'] for f in data['findings']]
+    assert severities == ['high', 'medium', 'low']
+    # Verify all 4 required PPE categories are present
+    ppe_items = {item['item']: item for item in data['ppe_checklist']}
+    assert 'Hard hats' in ppe_items
+    assert 'High-visibility vests' in ppe_items
+    assert 'Safety footwear' in ppe_items
+    assert 'Fall-arrest/restraint equipment' in ppe_items
+    assert ppe_items['Hard hats']['status'] == 'observed'
+    assert ppe_items['Fall-arrest/restraint equipment']['status'] == 'not_observed'
+    assert ppe_items['Safety footwear']['status'] == 'not_assessable'
+    # Prioritized actions
+    assert any('Immediate:' in act for act in data['prioritized_actions'])
+    assert any('Priority:' in act for act in data['prioritized_actions'])
+    assert any('Routine:' in act for act in data['prioritized_actions'])
+
+def test_crack_mode_keeps_safety_fields_null(monkeypatch):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+
+    crack_data = {
+        'summary': 'Linear hairline crack along plaster joint.',
+        'findings': [{
+            'title': 'Plaster joint crack',
+            'detail': 'Non-structural separation',
+            'severity': 'low',
+            'confidence': 0.8,
+            'action': 'Monitor and fill during cosmetic refurbishment',
+        }],
+        'limitations': [],
+    }
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{'content': {'parts': [{'text': json.dumps(crack_data)}]}}],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    response = client.post('/api/analyze?mode=crack', files={'image': ('crack.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data['mode'] == 'crack'
+    assert data['safety_score'] is None
+    assert data['ppe_checklist'] is None
+    assert data['prioritized_actions'] is None
+
+def test_assistant_with_full_site_context(monkeypatch):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+
+    captured_prompt = []
+
+    def fake_gemini(prompt, **kwargs):
+        captured_prompt.append(prompt)
+        return json.dumps({'answer': 'Slab casting can proceed provided rain cover and lighting are ready.'})
+
+    monkeypatch.setattr(main, 'gemini', fake_gemini)
+
+    payload = {
+        'message': 'Can we proceed with slab casting tonight under rain?',
+        'kind': 'chat',
+        'site_context': {
+            'activity': 'Slab casting',
+            'labour_count': 15,
+            'site_condition': 'Wet/Slippery',
+            'location': 'Pune',
+            'weather_summary': 'Light rain, 23C, 80% precipitation',
+            'work_timing': 'Night shift (19:00 - 03:00)',
+            'notes': 'Concrete pump on site with backup generator',
+        },
+    }
+
+    response = client.post('/api/assistant', json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data['provider'] == 'Gemini'
+    assert 'Slab casting' in data['context_summary']
+    assert '15 workers' in data['context_summary']
+    assert 'Wet/Slippery' in data['context_summary']
+    assert 'Pune' in data['context_summary']
+    assert len(captured_prompt) == 1
+    assert 'Planned Activity: Slab casting' in captured_prompt[0]
+    assert 'Workforce Count: 15 workers on site' in captured_prompt[0]
+    assert 'Ground & Site Conditions: Wet/Slippery' in captured_prompt[0]
+
+def test_assistant_offline_fallback_with_context(monkeypatch):
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: None)
+
+    payload = {
+        'message': 'What precautions are needed?',
+        'kind': 'chat',
+        'site_context': {
+            'activity': 'Deep excavation',
+            'labour_count': 6,
+            'site_condition': 'Muddy ground with high water table',
+            'location': 'Bengaluru',
+            'weather_summary': 'Heavy rain warning',
+        },
+    }
+
+    response = client.post('/api/assistant', json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data['provider'] == 'Offline guidance'
+    assert 'Deep excavation' in data['answer']
+    assert 'Muddy ground' in data['answer']
+    assert len(data['guidance']) >= 2
+
+def test_assistant_daily_report_mode_with_context(monkeypatch):
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: None)
+
+    payload = {
+        'message': 'Poured 45 cubic meters of concrete, no safety incidents.',
+        'kind': 'daily_report',
+        'site_context': {
+            'activity': 'Column and beam casting',
+            'labour_count': 18,
+            'site_condition': 'Normal',
+            'location': 'Mumbai',
+        },
+    }
+
+    response = client.post('/api/assistant', json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data['provider'] == 'Guided template'
+    assert 'Daily Site Report Structure' in data['answer']
+    assert 'Column and beam casting' in data['answer']
+    assert 'Mumbai' in data['answer']
+
+
+import ssl
+
+def test_cors_preflight_localhost_5174():
+    response = client.options(
+        "/api/assistant",
+        headers={
+            "Origin": "http://localhost:5174",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:5174"
+    assert response.headers.get("access-control-allow-credentials") == "true"
+    assert "POST" in response.headers.get("access-control-allow-methods", "")
+
+def test_cors_preflight_localhost_5173():
+    response = client.options(
+        "/api/assistant",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+def test_cors_production_origin_allowed():
+    response = client.options(
+        "/api/assistant",
+        headers={
+            "Origin": "https://construct-iq-eight.vercel.app",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "https://construct-iq-eight.vercel.app"
+
+    get_resp = client.get("/api/health", headers={"Origin": "https://construct-iq-eight.vercel.app"})
+    assert get_resp.status_code == 200
+    assert get_resp.headers.get("access-control-allow-origin") == "https://construct-iq-eight.vercel.app"
+
+def test_cors_unapproved_origin_rejected():
+    response = client.options(
+        "/api/assistant",
+        headers={
+            "Origin": "http://unapproved-origin.example.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+
+    get_resp = client.get("/api/health", headers={"Origin": "http://unapproved-origin.example.com"})
+    assert get_resp.status_code == 200
+    assert "access-control-allow-origin" not in get_resp.headers
+
+def test_assistant_accepts_frontend_request_schema_with_site_context(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(main, "gemini_api_key", lambda: None)
+
+    payload = {
+        "message": "Is concrete pouring advisable today?",
+        "kind": "chat",
+        "site_context": {
+            "activity": "Concrete slab pour",
+            "labour_count": 14,
+            "site_condition": "Muddy ground after overnight drizzle",
+            "location": "Pune, Maharashtra",
+            "weather_summary": "Pune: Light drizzle, 26 °C, precip 1.2 mm, wind 9 km/h (live weather)",
+            "work_timing": "Morning shift (08:00 - 16:00)",
+            "notes": "Ensure curing blankets and sump pumps are on standby",
+        },
+    }
+    response = client.post("/api/assistant", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["provider"] == "Offline guidance"
+    assert "Concrete slab pour" in data["answer"]
+    assert "Muddy ground after overnight drizzle" in data["answer"]
+    assert data["context_summary"] is not None
+    assert "Workforce Count: 14 workers on site" in data["context_summary"]
+    assert "Weather Context: Pune: Light drizzle" in data["context_summary"]
+
+def test_weather_ssl_verification_maintained_and_failures_handled_gracefully(monkeypatch, caplog):
+    ssl_ctx = main._weather_ssl_context()
+    assert isinstance(ssl_ctx, ssl.SSLContext)
+    assert ssl_ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ssl_ctx.check_hostname is True
+
+    def ssl_failure(*_args, **_kwargs):
+        raise main.URLError(ssl.SSLError("certificate verify failed: certificate has expired"))
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", ssl_failure)
+    with caplog.at_level(logging.WARNING):
+        response = client.get("/api/weather", params={"location": "Pune"})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Location lookup is unavailable. Try again shortly."
+    assert "stage=geocoding kind=network_error" in caplog.text
+
+def test_assistant_handles_manual_weather_when_live_weather_fails(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(main, "gemini_api_key", lambda: None)
+
+    manual_weather = "Manual entry: 32 °C Sunny, dry compact ground, light breeze"
+    payload = {
+        "message": "Review roofing and scaffolding safety requirements.",
+        "kind": "chat",
+        "site_context": {
+            "activity": "Roof truss installation",
+            "labour_count": 8,
+            "site_condition": "Dry / firm footing",
+            "location": "Pune site",
+            "weather_summary": manual_weather,
+            "work_timing": "Full day shift",
+            "notes": "High wind limit is 25 km/h",
+        },
+    }
+    response = client.post("/api/assistant", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["provider"] == "Offline guidance"
+    assert "Roof truss installation" in data["answer"]
+    assert manual_weather in data["context_summary"]

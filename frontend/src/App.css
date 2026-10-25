@@ -11,6 +11,214 @@
 .capability-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.capability-card{min-height:155px;position:relative;padding:18px 20px}.capability-number{font-size:9px;letter-spacing:1px;color:#98aa77}.capability-card h2{font:700 14px Manrope;color:#293329;margin:8px 0}.capability-card p{font-size:11px;line-height:1.6;color:#7e877c;min-height:35px}.capability-card .text-button{margin-top:12px;padding:0}
 .live-weather-panel{margin-top:15px}.live-weather-panel .panel-intro{margin:8px 0 13px}.weather-search{display:grid;grid-template-columns:130px minmax(160px,1fr) auto;align-items:center;gap:9px;max-width:690px}.weather-search label{font-size:10px;font-weight:600;color:#596457}.weather-search input{min-width:0;border:1px solid #e1e6dc;border-radius:5px;padding:9px 10px;background:#fff;color:#303930;font-size:11px}.weather-search .primary-button{white-space:nowrap}.weather-state,.weather-error{font-size:10px;color:#838d80;margin-top:13px}.weather-error{color:#a84e30}.weather-result{border-top:1px solid #edf0eb;margin-top:16px;padding-top:14px}.weather-current{display:grid;gap:5px}.weather-current strong{font:700 17px Manrope;color:#293329}.weather-current>span:last-child{font-size:10px;color:#697468}.weather-result h3{font:600 11px Manrope;color:#495447;margin:16px 0 8px}.forecast-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.forecast-day{display:grid;gap:5px;padding:10px;border:1px solid #e8ebe5;border-radius:6px;font-size:9px;color:#758071}.forecast-day b{color:#3b473a;font-size:10px}.forecast-day small,.weather-guidance{font-size:9px;color:#858f81;line-height:1.5}.weather-guidance{display:block;margin-top:10px}
 .report-heading,.material-input-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}.report-heading h2{margin:4px 0 0}.materials-note{font-size:9px;line-height:1.5;margin:7px 0}.estimate-disclaimer{font-size:9px;line-height:1.5;color:#8c8064;background:#fbf8f1;border-radius:5px;padding:9px;margin:12px 0}.app-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:20px 2px 0;color:#90988e;font-size:8px;letter-spacing:.7px}.footer-links{display:flex;gap:14px}.footer-links a{color:#71884c;text-decoration:none;letter-spacing:0}.footer-links a:hover{text-decoration:underline}
+
+.safety-score-card{background:linear-gradient(135deg,#f8faf4 0%,#edf4e2 100%);border:1px solid #d4e0c4;border-radius:8px;padding:16px 18px;margin-bottom:14px}
+.safety-score-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.score-badge{font-size:8px;font-weight:700;letter-spacing:.7px;padding:3px 7px;border-radius:4px;text-transform:uppercase}
+.score-badge.critical{background:#ffebe6;color:#c0392b}
+.score-badge.warning{background:#fff1e0;color:#c2781b}
+.score-badge.moderate{background:#f3f8e5;color:#708b2d}
+.score-badge.good{background:#e7f5d9;color:#3f7c1d}
+.score-badge.unavailable{background:#edf0eb;color:#788375}
+.score-display{display:flex;align-items:baseline;gap:5px;margin:4px 0 8px}
+.score-number{font:800 36px Manrope;letter-spacing:-1px;color:#202e21}
+.score-total{font:600 14px Manrope;color:#7a8675}
+.score-unavailable-text{font:700 18px Manrope;color:#758071}
+.score-bar-track{height:7px;background:#dce4d4;border-radius:4px;overflow:hidden;margin:6px 0 8px}
+.score-bar-fill{height:100%;border-radius:4px;transition:width .4s ease}
+.score-bar-fill.critical{background:#c0392b}
+.score-bar-fill.warning{background:#e67e22}
+.score-bar-fill.moderate{background:#a2c943}
+.score-bar-fill.good{background:#60a830}
+.score-caption{font-size:9.5px;color:#677464;line-height:1.5}
+
+.overall-assessment-card{background:#fafbf8;border:1px solid #e7ede2;border-radius:7px;padding:12px 14px;margin-bottom:14px}
+.assessment-summary{font-size:11px;line-height:1.65;color:#495447;margin-top:6px}
+
+.ppe-section{margin:16px 0;border-top:1px solid #edf0eb;padding-top:14px}
+.section-subtitle{font-size:9.5px;color:#858f82;line-height:1.55;margin:4px 0 10px}
+.ppe-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+.ppe-item-card{border:1px solid #e5ebe0;background:#fafbf8;border-radius:6px;padding:9px 11px}
+.ppe-item-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.ppe-name{font-weight:700;font-size:10.5px;color:#2e392d}
+.ppe-status{font-size:8px;font-weight:700;letter-spacing:.6px;padding:3px 6px;border-radius:3px;text-transform:uppercase}
+.ppe-status.observed{background:#e7f5d9;color:#3f7c1d}
+.ppe-status.not_observed{background:#fff0e5;color:#c17636}
+.ppe-status.not_assessable{background:#edf0eb;color:#6f7a6c}
+.ppe-explanation{font-size:9px;line-height:1.5;color:#667364}
+
+.hazards-section{margin:18px 0;border-top:1px solid #edf0eb;padding-top:14px}
+.findings-list{display:grid;gap:10px;margin-top:10px}
+.finding-card{border:1px solid #e8ede4;background:#fff;border-radius:6px;padding:12px 14px}
+.finding-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.finding-head b{font-size:11px;color:#293328}
+.finding-meta,.finding-risk,.finding-action{font-size:9.5px;line-height:1.55;margin:4px 0;color:#525f50}
+.finding-meta strong,.finding-risk strong,.finding-action strong{color:#2a3629}
+.finding-detail{font-size:10px;line-height:1.6;color:#5a6757;margin:6px 0}
+.finding-foot{display:flex;justify-content:space-between;align-items:center;font-size:8.5px;color:#8f988c;margin-top:8px;padding-top:6px;border-top:1px dashed #eef2ec}
+.hazard-rank{font-weight:600;color:#788f57}
+
+.prioritized-actions-section{margin:18px 0;border-top:1px solid #edf0eb;padding-top:14px}
+.prioritized-list{display:grid;gap:7px;margin-top:8px}
+.prioritized-item{display:flex;align-items:flex-start;gap:9px;background:#fafbf8;border:1px solid #e7ece2;border-radius:6px;padding:8px 11px;font-size:9.5px;line-height:1.5;color:#455243}
+.prioritized-item-num{font-weight:800;font-size:9px;color:#658434;background:#e9f2d9;width:19px;height:19px;border-radius:50%;display:grid;place-items:center;flex-shrink:0}
+.limitations-section{margin:18px 0;border-top:1px solid #edf0eb;padding-top:14px}
+.limitations-list{display:grid;gap:4px;margin:8px 0}
+.warning-notice{background:#fff8ee;border:1px solid #f2dfc2;color:#8a652d;padding:10px 12px;border-radius:5px;font-size:9.5px;line-height:1.55;margin-top:10px}
+.warning-notice strong{color:#6c4b1a}
+
+.context-form-card{background:#fafbf8;border:1px solid #e2e8dc;border-radius:8px;padding:13px 14px;margin:10px 0 14px}
+.context-form-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.context-form-header h3{font:700 12px Manrope;color:#2f3a2d;margin:2px 0 0}
+.context-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:8px}
+.context-grid .full-width{grid-column:span 2}
+.context-grid label{font-size:9px;font-weight:700;color:#556251;display:flex;flex-direction:column;gap:3px}
+.context-grid input,.context-grid select{border:1px solid #dce2d7;border-radius:5px;padding:7px 9px;background:#fff;color:#2f3a2d;font-size:10px}
+.location-input-group{display:flex;gap:6px}
+.location-input-group input{flex:1}
+.location-input-group button{white-space:nowrap;padding:7px 11px;font-size:9px}
+.weather-context-pill{background:#eef6e4;border:1px solid #cfe0bd;border-radius:5px;padding:7px 10px;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:9.5px;color:#3b522a}
+.weather-context-pill button{background:none;border:0;color:#7b8e6b;cursor:pointer;font-size:12px;padding:0 4px}
+.assistant-reply-context{background:#eef5e4;border:1px solid #d3e4c4;border-radius:5px;padding:6px 10px;font-size:9.5px;color:#3f572a;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.formatted-answer{display:grid;gap:8px;margin-top:6px}
+.answer-heading{font:700 12px Manrope;color:#2b372a;margin:10px 0 3px;letter-spacing:-.2px}
+.answer-list{margin:4px 0 6px 16px;padding:0;font-size:10.5px;line-height:1.6;color:#556152}
+.answer-list li{margin-bottom:3px}
+.assistant-guidance-box{background:#f8faf5;border-left:3px solid #9dc44d;padding:8px 12px;margin:10px 0;border-radius:0 5px 5px 0}
+.assistant-guidance-box h4{font:700 10.5px Manrope;color:#3e4c3c;margin:0 0 5px}
+.assistant-guidance-box p{font-size:10px;line-height:1.55;color:#5d6a5a;margin:3px 0}
+
+/* Assistant Report Presentation */
+.assistant-report-shell{margin-top:14px;border-top:1px solid #edf0eb;padding-top:14px}
+.assistant-report-topbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.report-topbar-left{display:flex;align-items:center;gap:8px}
+.assistant-score-pill{background:#edf6e1;border:1px solid #d0e4ba;border-radius:4px;padding:3px 7px;font-size:9px;color:#456627}
+.assistant-score-pill b{color:#2e4917;margin-left:3px}
+.assistant-report-actions{display:flex;align-items:center;gap:6px}
+
+/* A. Site Context */
+.assistant-context-panel{background:#fafbf8;border:1px solid #e5ebe0;border-radius:6px;padding:10px 12px;margin-bottom:14px}
+.context-panel-title{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.context-panel-title small{font-size:9px;color:#889484}
+.context-chips-row{display:flex;flex-wrap:wrap;gap:6px}
+.context-chip{display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid #dde4d7;border-radius:4px;padding:4px 7px;font-size:9px;color:#3f4d3d}
+.chip-label{font-weight:700;color:#5a6858}
+.chip-value{color:#2a3628}
+
+/* B. Executive Summary */
+.assistant-section{margin-bottom:16px}
+.executive-summary-section{background:#f8faf5;border:1px solid #e5ece0;border-radius:6px;padding:12px 14px}
+.executive-summary-text{font-size:11px;line-height:1.68;color:#354234;margin-top:5px;max-width:850px}
+
+/* D1. Stop-Work Conditions */
+.stop-work-card{background:#fff7f5;border:1px solid #f6d1c8;border-left:4px solid #c0392b;border-radius:6px;padding:11px 13px;margin-bottom:14px}
+.stop-work-head{display:flex;align-items:flex-start;gap:8px;margin-bottom:6px}
+.stop-icon{font-size:14px;line-height:1}
+.stop-work-head strong{font-size:10.5px;color:#9b2a1e;display:block}
+.stop-work-head small{font-size:9px;color:#a44d43;display:block;margin-top:2px}
+.stop-work-list{margin:4px 0 2px 20px;padding:0;font-size:10px;line-height:1.6;color:#7a241a}
+.stop-work-list li{margin-bottom:2px}
+
+/* C. Priority Findings */
+.priority-findings-section .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.priority-findings-section h3{font:700 13px Manrope;color:#273426;margin:2px 0 0}
+.assistant-findings-grid{display:grid;gap:10px}
+.assistant-finding-card{border:1px solid #e7ede2;background:#fff;border-radius:6px;padding:12px 14px}
+.assistant-finding-card.sev-high,.assistant-finding-card.sev-critical{border-left:4px solid #c0392b;background:#fffdfc}
+.assistant-finding-card.sev-medium{border-left:4px solid #d97706;background:#fffdfa}
+.assistant-finding-card.sev-low{border-left:4px solid #65a30d;background:#fafcf7}
+
+.finding-card-header{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.severity-tag{font-size:8px;font-weight:700;letter-spacing:.6px;padding:2px 5px;border-radius:3px}
+.severity-tag.high,.severity-tag.critical{background:#ffeae5;color:#b72b1a}
+.severity-tag.medium{background:#fef3c7;color:#b45309}
+.severity-tag.low{background:#ecfccb;color:#3f6212}
+.finding-title{font:700 11.5px Manrope;color:#222e21;margin:0;flex:1}
+.finding-conf{font-size:9px;font-weight:600;color:#828e7e}
+.finding-meta-row{font-size:9.5px;color:#596756;margin:4px 0}
+.meta-label{font-weight:700;color:#3e4c3c;margin-right:4px}
+.finding-detail-text{font-size:10px;line-height:1.6;color:#495646;margin:6px 0}
+.finding-risk-callout{background:#fef6f1;border:1px solid #f9ded0;border-radius:4px;padding:6px 9px;font-size:9.5px;line-height:1.55;color:#87491d;margin:6px 0}
+.finding-action-callout{background:#f4f9ee;border:1px solid #d7e8c4;border-radius:4px;padding:6px 9px;font-size:9.5px;line-height:1.55;color:#34551f;margin:6px 0}
+
+/* D2. Recommended Actions Checklist */
+.actions-section .section-head{margin-bottom:8px}
+.actions-section h3{font:700 13px Manrope;color:#273426;margin:2px 0 0}
+.actions-checklist{display:grid;gap:6px}
+.action-check-item{display:flex;align-items:flex-start;gap:9px;background:#fafbf8;border:1px solid #e7ede2;border-radius:5px;padding:8px 11px;font-size:10px;line-height:1.55;color:#414e3f}
+.action-check-item.urgent-item{background:#fff8f6;border-color:#f7d6ce}
+.action-step-num{font-weight:800;font-size:9px;color:#658434;background:#e9f2d9;width:19px;height:19px;border-radius:50%;display:grid;place-items:center;flex-shrink:0}
+.action-check-item.urgent-item .action-step-num{background:#ffdcd4;color:#b0291a}
+.action-content{flex:1}
+.urgent-badge{background:#ffeae5;color:#b72b1a;font-size:7.5px;font-weight:700;letter-spacing:.6px;padding:2px 5px;border-radius:3px;margin-right:6px}
+
+/* E. PPE Checklist */
+.ppe-checklist-section .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.ppe-checklist-section h3{font:700 13px Manrope;color:#273426;margin:2px 0 0}
+
 .theme-dark{background:#151b17;color:#e7ece5}.theme-dark .main{background:#151b17}.theme-dark .topbar,.theme-dark .panel,.theme-dark .metric-card{background:#202923;border-color:#354137}.theme-dark .crumb,.theme-dark .api-status,.theme-dark .page-title p,.theme-dark .muted,.theme-dark .section-kicker{color:#a5b09f}.theme-dark h1,.theme-dark .panel h2,.theme-dark .capability-card h2,.theme-dark .weather-current strong,.theme-dark .forecast-day b{color:#edf2e9}.theme-dark .utility-button,.theme-dark .weather-search input,.theme-dark .form-grid input,.theme-dark .form-grid select,.theme-dark .material-input input,.theme-dark .assistant-panel textarea{background:#18211b;border-color:#465449;color:#e7ece5}.theme-dark .utility-button{color:#d7e2d0}.theme-dark .overview-hero{background:linear-gradient(115deg,#202923 65%,#293526)}.theme-dark .overview-hero p,.theme-dark .capability-card p,.theme-dark .weather-current>span:last-child,.theme-dark .weather-state,.theme-dark .forecast-day,.theme-dark .finding p,.theme-dark .assistant-reply p,.theme-dark .safety-note p{color:#bac5b7}.theme-dark .result-summary,.theme-dark .notice,.theme-dark .budget-line,.theme-dark .assumptions,.theme-dark .estimate-disclaimer,.theme-dark .safety-note{background:#283329;color:#d5dfd0}.theme-dark .dropzone,.theme-dark .prompt-chips button{background:#19221c;border-color:#465449;color:#d5dfd0}.theme-dark .form-grid label,.theme-dark .material-input b,.theme-dark .plan-results h3,.theme-dark .material-row b,.theme-dark .task-row b{color:#d4dfd0}.theme-dark .material-row,.theme-dark .task-row,.theme-dark .finding,.theme-dark .assistant-reply,.theme-dark .weather-result{border-color:#354137}.theme-dark .forecast-day{border-color:#465449}.theme-dark .weather-search label{color:#d4dfd0}.theme-dark .error-banner{background:#442a25;border-color:#70453b;color:#ffd3c3}.theme-dark .secondary-button{background:#354332;color:#e3ecd8}.theme-dark .estimate-strip,.theme-dark .estimate-strip b{color:#c1cbbb}.theme-dark .app-footer{color:#9aa697}
-@media(max-width:760px){.capability-grid{grid-template-columns:1fr}.weather-search{grid-template-columns:1fr}.forecast-grid{grid-template-columns:1fr}.overview-hero{padding:20px}.top-actions{gap:5px}.utility-button{font-size:8px;padding:6px}.brand-tagline{max-width:none}}
-@media print{html,body,#root,.app-shell,.main,.content{background:#fff!important;color:#111!important;min-height:0!important;width:100%!important;margin:0!important;padding:0!important}.sidebar,.topbar,.page-title,.app-footer,.no-print,.upload-panel,.form-panel,.plan-results:not(.has-plan),.empty-result{display:none!important}.main{margin:0!important}.content{max-width:none!important}.panel,.capability-card,.overview-hero,.plan-results,.result-panel,.assistant-panel,.safety-note,.weather-panel{box-shadow:none!important;border:1px solid #bbb!important;break-inside:avoid;background:#fff!important;color:#111!important}.panel h2,.panel h3,.panel p,.panel b,.panel span,.panel small,.panel a{color:#111!important}.capability-grid{grid-template-columns:repeat(2,1fr)}.finding,.cost-list,.assumptions,.weather-result{break-inside:avoid}.primary-button,.secondary-button,button,input,select,textarea{display:none!important}.content footer{display:none!important}}
+
+.theme-dark .safety-score-card{background:linear-gradient(135deg,#1d2720 0%,#263529 100%);border-color:#3c4d3e}
+.theme-dark .score-number{color:#ebf3e6}
+.theme-dark .score-total{color:#9bb094}
+.theme-dark .score-unavailable-text{color:#9cb097}
+.theme-dark .score-bar-track{background:#354437}
+.theme-dark .score-caption{color:#a5b4a0}
+.theme-dark .overall-assessment-card,.theme-dark .finding-card,.theme-dark .prioritized-item{background:#1a231d;border-color:#384639}
+.theme-dark .assessment-summary,.theme-dark .finding-detail,.theme-dark .finding-meta,.theme-dark .finding-risk,.theme-dark .finding-action,.theme-dark .prioritized-item{color:#c4cfbf}
+.theme-dark .finding-head b,.theme-dark .finding-meta strong,.theme-dark .finding-risk strong,.theme-dark .finding-action strong,.theme-dark .context-form-header h3,.theme-dark .answer-heading{color:#e3ede0}
+.theme-dark .finding-foot{border-color:#2f3c31;color:#8a9786}
+.theme-dark .ppe-section,.theme-dark .hazards-section,.theme-dark .prioritized-actions-section,.theme-dark .limitations-section{border-color:#354137}
+.theme-dark .ppe-item-card{background:#19221c;border-color:#384639}
+.theme-dark .ppe-name{color:#e5ece2}
+.theme-dark .ppe-explanation{color:#a4b0a1}
+.theme-dark .ppe-status.observed{background:#2b3d22;color:#b7e387}
+.theme-dark .ppe-status.not_observed{background:#4a2d1d;color:#f9b17d}
+.theme-dark .ppe-status.not_assessable{background:#2c362d;color:#aeb9aa}
+.theme-dark .prioritized-item-num{background:#2e3e26;color:#c0e67e}
+.theme-dark .warning-notice{background:#382d1c;border-color:#5c4728;color:#f3d7a8}
+.theme-dark .warning-notice strong{color:#ffeed1}
+.theme-dark .context-form-card{background:#1a231d;border-color:#364538}
+.theme-dark .context-grid label{color:#bac7b5}
+.theme-dark .context-grid input,.theme-dark .context-grid select{background:#151d17;border-color:#3c4c3e;color:#e7ece5}
+.theme-dark .weather-context-pill{background:#223321;border-color:#3d5639;color:#c2e8a6}
+.theme-dark .assistant-reply-context{background:#223321;border-color:#3d5639;color:#c2e8a6}
+.theme-dark .answer-list{color:#bac7b6}
+.theme-dark .assistant-guidance-box{background:#1e2920;border-left-color:#a5cf4f}
+.theme-dark .assistant-guidance-box h4{color:#deecda}
+.theme-dark .assistant-guidance-box p{color:#b3c2ae}
+
+.theme-dark .assistant-report-shell{border-color:#354137}
+.theme-dark .assistant-score-pill{background:#233420;border-color:#3c5636;color:#c0e9a2}
+.theme-dark .assistant-score-pill b{color:#dcf8c2}
+.theme-dark .assistant-context-panel{background:#1a231d;border-color:#384639}
+.theme-dark .context-panel-title small{color:#9aa796}
+.theme-dark .context-chip{background:#151d17;border-color:#3d4c3e;color:#d5dfd1}
+.theme-dark .chip-label{color:#c4cfbf}
+.theme-dark .chip-value{color:#e6ede3}
+.theme-dark .executive-summary-section{background:#1c251f;border-color:#384639}
+.theme-dark .executive-summary-text{color:#d2ded0}
+.theme-dark .stop-work-card{background:#38221e;border-color:#65372e;border-left-color:#d9534f}
+.theme-dark .stop-work-head strong{color:#ffb5aa}
+.theme-dark .stop-work-head small{color:#f5c4bd}
+.theme-dark .stop-work-list{color:#f5c9c3}
+.theme-dark .priority-findings-section h3,.theme-dark .actions-section h3,.theme-dark .ppe-checklist-section h3{color:#edf2e9}
+.theme-dark .assistant-finding-card{border-color:#384639;background:#1a231d}
+.theme-dark .assistant-finding-card.sev-high,.theme-dark .assistant-finding-card.sev-critical{background:#251b19;border-left-color:#d9534f}
+.theme-dark .assistant-finding-card.sev-medium{background:#241f17;border-left-color:#e67e22}
+.theme-dark .assistant-finding-card.sev-low{background:#1c251c;border-left-color:#84cc16}
+.theme-dark .finding-title{color:#e7eee4}
+.theme-dark .finding-conf{color:#96a293}
+.theme-dark .finding-meta-row{color:#b6c2b3}
+.theme-dark .meta-label{color:#dde6db}
+.theme-dark .finding-detail-text{color:#c7d3c4}
+.theme-dark .finding-risk-callout{background:#342217;border-color:#5c3924;color:#f9b88e}
+.theme-dark .finding-action-callout{background:#1e2d1d;border-color:#3d5639;color:#bfe9a2}
+.theme-dark .action-check-item{background:#1a231d;border-color:#384639;color:#d0ded0}
+.theme-dark .action-check-item.urgent-item{background:#2d1d1a;border-color:#5e352d}
+.theme-dark .action-step-num{background:#2b3a24;color:#bfe682}
+.theme-dark .action-check-item.urgent-item .action-step-num{background:#4c241e;color:#ff9e92}
+
+@media(max-width:760px){.capability-grid{grid-template-columns:1fr}.weather-search{grid-template-columns:1fr}.forecast-grid{grid-template-columns:1fr}.overview-hero{padding:20px}.top-actions{gap:5px}.utility-button{font-size:8px;padding:6px}.brand-tagline{max-width:none}.ppe-grid{grid-template-columns:1fr}.context-grid{grid-template-columns:1fr}.context-grid .full-width{grid-column:span 1}.assistant-report-topbar{flex-direction:column;align-items:flex-start}.assistant-report-actions{width:100%;justify-content:flex-start}}
+
+@media print{html,body,#root,.app-shell,.main,.content{background:#fff!important;color:#111!important;min-height:0!important;width:100%!important;margin:0!important;padding:0!important}.sidebar,.topbar,.page-title,.app-footer,.no-print,.upload-panel,.form-panel,.plan-results:not(.has-plan),.empty-result{display:none!important}.main{margin:0!important}.content{max-width:none!important}.panel,.capability-card,.overview-hero,.plan-results,.result-panel,.assistant-panel,.safety-note,.weather-panel,.safety-score-card,.overall-assessment-card,.finding-card,.ppe-item-card,.prioritized-item,.assistant-report-shell,.assistant-finding-card,.action-check-item,.stop-work-card{box-shadow:none!important;border:1px solid #bbb!important;break-inside:avoid;background:#fff!important;color:#111!important}.panel h2,.panel h3,.panel p,.panel b,.panel span,.panel small,.panel a,.score-number,.score-total,.ppe-name,.ppe-explanation,.finding-detail,.finding-meta strong,.finding-risk strong,.finding-action strong,.executive-summary-text,.finding-title,.meta-label{color:#111!important}.capability-grid{grid-template-columns:repeat(2,1fr)}.finding,.cost-list,.assumptions,.weather-result,.safety-results,.finding-card,.ppe-grid,.assistant-findings-grid,.actions-checklist{break-inside:avoid}.primary-button,.secondary-button,button,input,select,textarea,.assistant-report-actions{display:none!important}.content footer{display:none!important}}
