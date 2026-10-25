@@ -523,3 +523,114 @@ def test_analyze_non_http_failure_logs_safe_type_and_message(monkeypatch, caplog
     assert secret not in caplog.text
     assert private_image not in caplog.text
     assert 'example.test' not in caplog.text
+
+def test_gemini_model_normalizes_stale_gemini_38_flash(monkeypatch):
+    monkeypatch.setenv('GEMINI_MODEL', 'gemini-3.8-flash')
+    assert main.gemini_model() == 'gemini-3.5-flash-lite'
+    monkeypatch.setenv('GEMINI_MODEL', '  gemini-3.8-flash  ')
+    assert main.gemini_model() == 'gemini-3.5-flash-lite'
+    monkeypatch.setenv('GEMINI_MODEL', '')
+    assert main.gemini_model() == 'gemini-3.5-flash-lite'
+
+def test_analyze_parses_markdown_wrapped_json_response(monkeypatch):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+    result = {
+        'summary': 'Fenced JSON response',
+        'findings': [{
+            'title': 'Trip hazard',
+            'detail': 'Loose cables on walkway.',
+            'severity': 'low',
+            'confidence': 0.85,
+            'action': 'Route cables overhead or secure with cable protectors.',
+        }],
+        'limitations': ['Visual observations only.'],
+    }
+    fenced_text = f"```json\n{json.dumps(result)}\n```"
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{
+                    'content': {
+                        'role': 'model',
+                        'parts': [{'text': fenced_text}],
+                    },
+                    'finishReason': 'STOP',
+                }],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 200
+    assert response.json()['summary'] == result['summary']
+    assert response.json()['findings'][0]['title'] == 'Trip hazard'
+
+def test_analyze_handles_null_or_missing_limitations(monkeypatch):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+    result = {
+        'summary': 'Response with null limitations',
+        'findings': [],
+        'limitations': None,
+    }
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{
+                    'content': {
+                        'role': 'model',
+                        'parts': [{'text': json.dumps(result)}],
+                    },
+                    'finishReason': 'STOP',
+                }],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    response = client.post('/api/analyze?mode=crack', files={'image': ('crack.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 200
+    assert response.json()['summary'] == result['summary']
+    assert 'No precise crack dimensions can be inferred without a scale reference.' in response.json()['limitations']
+
+def test_analyze_uses_flash_lite_url_when_stale_gemini_38_is_in_environment(monkeypatch):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setenv('GEMINI_MODEL', 'gemini-3.8-flash')
+    calls = []
+    result = {
+        'summary': 'Observation with stale env var',
+        'findings': [],
+        'limitations': [],
+    }
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{
+                    'content': {
+                        'role': 'model',
+                        'parts': [{'text': json.dumps(result)}],
+                    },
+                    'finishReason': 'STOP',
+                }],
+            }).encode()
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', fake_urlopen)
+    response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].endswith('/models/gemini-3.5-flash-lite:generateContent')
+

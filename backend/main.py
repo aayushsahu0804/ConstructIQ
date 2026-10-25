@@ -261,7 +261,11 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
         )
         if not answer_text:
             raise ValueError("Gemini response did not contain answer text")
-        return answer_text
+        cleaned_text = answer_text.strip()
+        if cleaned_text.startswith("```"):
+            cleaned_text = re.sub(r"^```(?:json)?\s*", "", cleaned_text, flags=re.IGNORECASE)
+            cleaned_text = re.sub(r"\s*```$", "", cleaned_text)
+        return cleaned_text
     except Exception as exc:
         _log_provider_exception(exc, key, image or b"")
         logger.warning("Gemini response parsing failed: model=%s", selected_model)
@@ -275,7 +279,8 @@ async def analyze(mode: Literal["safety", "crack"], image: UploadFile = File(...
     instruction = ("Review this construction site photo for visibly observable PPE and hazards. Do not infer hidden facts. Return JSON with summary, findings array of title,detail,severity(low|medium|high),confidence(0..1),action, limitations array. State observations are not verified compliance." if mode == "safety" else "Describe the visible crack pattern, cautious severity and possible causes, and inspection/remediation steps. Never infer precise dimensions without scale. Return JSON summary, findings array(title,detail,severity low|medium|high,confidence 0..1,action),limitations array.")
     try:
         parsed = json.loads(gemini(instruction, data, image.content_type))
-        limitations = parsed.get("limitations", [])
+        raw_limitations = parsed.get("limitations")
+        limitations = [str(x) for x in raw_limitations] if isinstance(raw_limitations, list) else []
         if mode == "safety": limitations.append("Visual observations only; PPE compliance is not verified.")
         if mode == "crack": limitations.append("No precise crack dimensions can be inferred without a scale reference.")
         return ImageAnalysis(mode=mode, provider="Gemini", summary=parsed["summary"], findings=parsed["findings"], limitations=limitations)
