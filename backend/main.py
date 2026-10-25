@@ -3,12 +3,12 @@ import base64, json, logging, os, random, re, socket, time, urllib.parse, urllib
 from typing import Literal
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from urllib.error import HTTPError, URLError
 if __package__:  # `uvicorn backend.main:app` from project root.
-    from .config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_fallback_model, gemini_model, gemini_timeout_seconds
+    from .config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_model, gemini_timeout_seconds
 else:  # `uvicorn main:app` from backend/.
-    from config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_fallback_model, gemini_model, gemini_timeout_seconds
+    from config import gemini_api_key, gemini_attempt_timeout_seconds, gemini_model, gemini_timeout_seconds
 
 app = FastAPI(title="Multimodal Construction Intelligence Platform", version="1.0.0")
 logger = logging.getLogger("uvicorn.error")
@@ -30,6 +30,32 @@ class ImageAnalysis(StrictModel):
     summary: str
     findings: list[Finding]
     limitations: list[str]
+
+# Keep Gemini output aligned with the Pydantic response contract.
+GEMINI_IMAGE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "action": {"type": "string"},
+                },
+                "required": ["title", "detail", "severity", "confidence", "action"],
+                "additionalProperties": False,
+            },
+        },
+        "limitations": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "findings", "limitations"],
+    "additionalProperties": False,
+}
 class Material(StrictModel):
     name: str
     quantity: float = Field(ge=0, le=100000000)
@@ -131,6 +157,14 @@ def _log_provider_exception(exc: Exception, api_key: str, image_bytes: bytes = b
     """Log a useful exception category and a conservative safe message."""
     if isinstance(exc, json.JSONDecodeError):
         message = f"invalid JSON at line {exc.lineno}, column {exc.colno}"
+    elif isinstance(exc, ValidationError):
+        errors = exc.errors(include_input=False, include_context=False)
+        safe_fields = []
+        for error in errors[:8]:
+            location = ".".join(str(part) for part in error.get("loc", ())) or "<root>"
+            error_type = str(error.get("type", "validation_error"))
+            safe_fields.append(_sanitize_log_text(f"{location}:{error_type}", api_key, image_bytes))
+        message = "response schema validation failed" + (f" ({'; '.join(safe_fields)})" if safe_fields else "")
     elif isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout)):
         message = f"Gemini request timed out after {gemini_timeout_seconds():g} seconds"
     elif isinstance(exc, urllib.error.URLError):
@@ -197,36 +231,41 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
     parts = [{"text": prompt}]
     if image: parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(image).decode()}})
     # Gemini 3.x rejects legacy sampling parameters such as temperature.
-    payload = {"contents": [{"parts": parts}], "generationConfig": {"responseMimeType": "application/json"}}
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "responseFormat": {
+                "text": {
+                    "mimeType": "APPLICATION_JSON",
+                    "schema": GEMINI_IMAGE_ANALYSIS_SCHEMA,
+                },
+            },
+        },
+    }
     timeout_budget = gemini_timeout_seconds()
-    started_at = time.monotonic()
-    deadline = started_at + timeout_budget
-    primary_deadline = started_at + timeout_budget / 2
-    primary = gemini_model()
-    fallback = gemini_fallback_model()
-    selected_model = primary
+    deadline = time.monotonic() + timeout_budget
+    model = gemini_model()
+    # Use only the configured primary model; bounded retries, when applicable,
+    # stay on this same model.
+    response = _gemini_model_request(model, payload, key, image or b"", deadline)
+    selected_model = model
     try:
-        response = _gemini_model_request(primary, payload, key, image or b"", primary_deadline)
-    except HTTPError as exc:
-        if exc.code != 503 or primary == fallback:
-            raise
-        if deadline - time.monotonic() < 5.0:
-            logger.warning("Gemini fallback skipped: model=%s reason=insufficient overall budget", fallback)
-            raise
-        logger.warning("Gemini fallback starting: model=%s reason=primary HTTP 503 after retries", fallback)
-        selected_model = fallback
-        response = _gemini_model_request(fallback, payload, key, image or b"", deadline)
-    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
-        if not _is_timeout_error(exc) or primary == fallback:
-            raise
-        if deadline - time.monotonic() < 5.0:
-            logger.warning("Gemini fallback skipped: model=%s reason=insufficient overall budget after primary timeout", fallback)
-            raise
-        logger.warning("Gemini fallback starting: model=%s reason=primary timeout", fallback)
-        selected_model = fallback
-        response = _gemini_model_request(fallback, payload, key, image or b"", deadline)
-    try:
-        return json.loads(response)["candidates"][0]["content"]["parts"][0]["text"]
+        rest_response = json.loads(response)
+        parts = rest_response["candidates"][0]["content"]["parts"]
+        answer_text = "".join(
+            part["text"]
+            for part in parts
+            if isinstance(part, dict)
+            and part.get("thought") is not True
+            and isinstance(part.get("text"), str)
+        )
+        if not answer_text:
+            raise ValueError("Gemini response did not contain answer text")
+        cleaned_text = answer_text.strip()
+        if cleaned_text.startswith("```"):
+            cleaned_text = re.sub(r"^```(?:json)?\s*", "", cleaned_text, flags=re.IGNORECASE)
+            cleaned_text = re.sub(r"\s*```$", "", cleaned_text)
+        return cleaned_text
     except Exception as exc:
         _log_provider_exception(exc, key, image or b"")
         logger.warning("Gemini response parsing failed: model=%s", selected_model)
@@ -240,7 +279,8 @@ async def analyze(mode: Literal["safety", "crack"], image: UploadFile = File(...
     instruction = ("Review this construction site photo for visibly observable PPE and hazards. Do not infer hidden facts. Return JSON with summary, findings array of title,detail,severity(low|medium|high),confidence(0..1),action, limitations array. State observations are not verified compliance." if mode == "safety" else "Describe the visible crack pattern, cautious severity and possible causes, and inspection/remediation steps. Never infer precise dimensions without scale. Return JSON summary, findings array(title,detail,severity low|medium|high,confidence 0..1,action),limitations array.")
     try:
         parsed = json.loads(gemini(instruction, data, image.content_type))
-        limitations = parsed.get("limitations", [])
+        raw_limitations = parsed.get("limitations")
+        limitations = [str(x) for x in raw_limitations] if isinstance(raw_limitations, list) else []
         if mode == "safety": limitations.append("Visual observations only; PPE compliance is not verified.")
         if mode == "crack": limitations.append("No precise crack dimensions can be inferred without a scale reference.")
         return ImageAnalysis(mode=mode, provider="Gemini", summary=parsed["summary"], findings=parsed["findings"], limitations=limitations)
