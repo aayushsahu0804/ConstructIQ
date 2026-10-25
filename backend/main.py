@@ -234,8 +234,12 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
     payload = {
         "contents": [{"parts": parts}],
         "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseJsonSchema": GEMINI_IMAGE_ANALYSIS_SCHEMA,
+            "responseFormat": {
+                "text": {
+                    "mimeType": "APPLICATION_JSON",
+                    "schema": GEMINI_IMAGE_ANALYSIS_SCHEMA,
+                },
+            },
         },
     }
     timeout_budget = gemini_timeout_seconds()

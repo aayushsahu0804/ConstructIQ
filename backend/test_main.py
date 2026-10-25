@@ -206,8 +206,12 @@ def test_gemini_request_uses_supported_model_auth_and_image_payload(monkeypatch)
     parts = observed['payload']['contents'][0]['parts']
     assert parts[1]['inline_data'] == {'mime_type': 'image/png', 'data': base64.b64encode(b'image-bytes').decode()}
     assert observed['payload']['generationConfig'] == {
-        'responseMimeType': 'application/json',
-        'responseJsonSchema': main.GEMINI_IMAGE_ANALYSIS_SCHEMA,
+        'responseFormat': {
+            'text': {
+                'mimeType': 'APPLICATION_JSON',
+                'schema': main.GEMINI_IMAGE_ANALYSIS_SCHEMA,
+            },
+        },
     }
     assert observed['timeout'] == 30
     assert observed['calls'] == 1  # Primary success does not invoke fallback.
@@ -273,6 +277,66 @@ def test_gemini_retries_transient_errors_then_succeeds(monkeypatch, caplog):
     assert 'status=500 retry_count=0' in caplog.text
     assert 'status=503 retry_count=1' in caplog.text
 
+@pytest.mark.parametrize('use_fallback', [False, True])
+def test_analyze_parses_standard_gemini_rest_response_for_primary_and_fallback(monkeypatch, use_fallback):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
+    monkeypatch.setattr(main, 'gemini_fallback_model', lambda: 'gemini-3.5-flash-lite')
+    result = {
+        'summary': 'Visible observation only',
+        'findings': [{
+            'title': 'Missing visible hard hat',
+            'detail': 'A worker appears without head protection.',
+            'severity': 'medium',
+            'confidence': 0.72,
+            'action': 'Verify PPE on site and provide required head protection.',
+        }],
+        'limitations': ['Visual observations only.'],
+    }
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{
+                    'content': {
+                        'role': 'model',
+                        'parts': [{'text': json.dumps(result)}],
+                    },
+                    'finishReason': 'STOP',
+                }],
+                'usageMetadata': {'promptTokenCount': 12, 'candidatesTokenCount': 30},
+            }).encode()
+
+    def fake_urlopen(request, timeout):
+        model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.5-flash-lite'
+        calls.append(model)
+        payload = json.loads(request.data)
+        assert payload['generationConfig']['responseFormat']['text'] == {
+            'mimeType': 'APPLICATION_JSON',
+            'schema': main.GEMINI_IMAGE_ANALYSIS_SCHEMA,
+        }
+        image_part = payload['contents'][0]['parts'][1]['inline_data']
+        assert image_part == {
+            'mime_type': 'image/png',
+            'data': base64.b64encode(b'site-image').decode(),
+        }
+        if use_fallback and model == 'gemini-3.8-flash':
+            raise _http_error(request, 429, 'RESOURCE_EXHAUSTED')
+        return FakeResponse()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', fake_urlopen)
+    response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'site-image', 'image/png')})
+
+    assert response.status_code == 200
+    assert response.json()['provider'] == 'Gemini'
+    assert response.json()['mode'] == 'safety'
+    assert response.json()['summary'] == result['summary']
+    assert response.json()['findings'][0]['severity'] == 'medium'
+    assert calls == (['gemini-3.8-flash', 'gemini-3.5-flash-lite'] if use_fallback else ['gemini-3.8-flash'])
+
 def test_gemini_falls_back_after_primary_503_and_validates_schema(monkeypatch, caplog):
     monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
     monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.8-flash')
@@ -291,7 +355,7 @@ def test_gemini_falls_back_after_primary_503_and_validates_schema(monkeypatch, c
         model = 'gemini-3.8-flash' if 'gemini-3.8-flash' in request.full_url else 'gemini-3.5-flash-lite'
         calls[model] += 1
         payload = json.loads(request.data)
-        assert payload['generationConfig']['responseJsonSchema'] == main.GEMINI_IMAGE_ANALYSIS_SCHEMA
+        assert payload['generationConfig']['responseFormat']['text']['schema'] == main.GEMINI_IMAGE_ANALYSIS_SCHEMA
         if model == 'gemini-3.8-flash':
             raise _http_error(request, 503, 'UNAVAILABLE')
         return FakeResponse()
