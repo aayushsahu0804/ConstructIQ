@@ -153,17 +153,41 @@ def _sanitized_provider_error(body: bytes, api_key: str, image_bytes: bytes = b"
     except (ValueError, AttributeError):
         return _sanitize_log_text(body.decode("utf-8", errors="replace"), api_key, image_bytes) or "[empty response body]"
 
-def _log_provider_exception(exc: Exception, api_key: str, image_bytes: bytes = b"") -> None:
+def _log_provider_exception(
+    exc: Exception,
+    api_key: str,
+    image_bytes: bytes = b"",
+    stage: str = "analysis",
+    model: str | None = None,
+    provider_status: int | None = None,
+) -> None:
     """Log a useful exception category and a conservative safe message."""
+    model_name = model or gemini_model()
+    is_validation = (
+        isinstance(exc, ValidationError)
+        or type(exc).__name__ == "ValidationError"
+        or "ValidationError" in type(exc).__name__
+    )
     if isinstance(exc, json.JSONDecodeError):
         message = f"invalid JSON at line {exc.lineno}, column {exc.colno}"
-    elif isinstance(exc, ValidationError):
-        errors = exc.errors(include_input=False, include_context=False)
+    elif is_validation:
+        errors = []
+        if hasattr(exc, "errors") and callable(exc.errors):
+            try:
+                errors = exc.errors(include_input=False, include_context=False)
+            except TypeError:
+                try:
+                    errors = exc.errors()
+                except Exception:
+                    errors = []
+            except Exception:
+                errors = []
         safe_fields = []
         for error in errors[:8]:
-            location = ".".join(str(part) for part in error.get("loc", ())) or "<root>"
-            error_type = str(error.get("type", "validation_error"))
-            safe_fields.append(_sanitize_log_text(f"{location}:{error_type}", api_key, image_bytes))
+            if isinstance(error, dict):
+                location = ".".join(str(part) for part in error.get("loc", ())) or "<root>"
+                error_type = str(error.get("type", "validation_error"))
+                safe_fields.append(_sanitize_log_text(f"{location}:{error_type}", api_key, image_bytes))
         message = "response schema validation failed" + (f" ({'; '.join(safe_fields)})" if safe_fields else "")
     elif isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout)):
         message = f"Gemini request timed out after {gemini_timeout_seconds():g} seconds"
@@ -174,12 +198,35 @@ def _log_provider_exception(exc: Exception, api_key: str, image_bytes: bytes = b
         message = f"Gemini request timed out after {gemini_timeout_seconds():g} seconds"
     elif isinstance(exc, KeyError):
         field = exc.args[0] if exc.args else "unknown"
-        message = f"missing provider response field: {field}" if field in {"candidates", "content", "parts", "text"} else "missing provider response field"
+        message = f"missing provider response field: {field}" if field in {"candidates", "content", "parts", "text", "summary", "findings", "limitations"} else "missing provider response field"
     elif isinstance(exc, (ValueError, IndexError, TypeError)):
-        message = "invalid provider response structure"
+        exc_str = str(exc)
+        if "blocked" in exc_str:
+            message = "provider blocked content"
+        elif "did not contain answer text" in exc_str:
+            message = "missing provider answer text"
+        elif "missing candidates" in exc_str:
+            message = "missing provider candidates"
+        elif "missing content" in exc_str:
+            message = "missing provider candidate content"
+        elif "missing parts" in exc_str:
+            message = "missing provider candidate parts"
+        elif "not a JSON object" in exc_str:
+            message = "provider response is not a JSON object"
+        else:
+            message = "invalid provider response structure"
     else:
         message = "details omitted to avoid logging request data"
-    logger.warning("Gemini analysis failed: exception_type=%s, safe_message=%s", type(exc).__name__, message)
+    if provider_status is not None:
+        logger.warning(
+            "Gemini analysis failed: exception_type=%s, stage=%s, model=%s, provider_status=%s, safe_message=%s",
+            type(exc).__name__, stage, model_name, provider_status, message,
+        )
+    else:
+        logger.warning(
+            "Gemini analysis failed: exception_type=%s, stage=%s, model=%s, safe_message=%s",
+            type(exc).__name__, stage, model_name, message,
+        )
 
 def _is_timeout_error(exc: Exception) -> bool:
     return isinstance(exc, (TimeoutError, socket.timeout)) or (
@@ -217,7 +264,7 @@ def _gemini_model_request(model: str, payload: dict, key: str, image: bytes, dea
                     model, retry_count + 1, attempt_timeout,
                 )
             else:
-                _log_provider_exception(exc, key, image)
+                _log_provider_exception(exc, key, image, stage="network_request", model=model)
                 logger.warning(
                     "Gemini attempt failed: model=%s attempt=%s timeout_seconds=%.2f reason=network error",
                     model, retry_count + 1, attempt_timeout,
@@ -251,7 +298,26 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
     selected_model = model
     try:
         rest_response = json.loads(response)
-        parts = rest_response["candidates"][0]["content"]["parts"]
+        if not isinstance(rest_response, dict):
+            raise ValueError("Gemini response is not a JSON object")
+        candidates = rest_response.get("candidates")
+        if not candidates or not isinstance(candidates, list):
+            prompt_feedback = rest_response.get("promptFeedback")
+            if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
+                raise ValueError(f"Gemini response blocked: {prompt_feedback.get('blockReason')}")
+            raise ValueError("Gemini response missing candidates")
+        candidate = candidates[0]
+        if not isinstance(candidate, dict):
+            raise ValueError("Gemini candidate is not a JSON object")
+        finish_reason = candidate.get("finishReason")
+        if finish_reason in {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}:
+            raise ValueError(f"Gemini candidate blocked by finishReason: {finish_reason}")
+        content = candidate.get("content")
+        if not content or not isinstance(content, dict):
+            raise ValueError("Gemini candidate missing content")
+        parts = content.get("parts")
+        if not parts or not isinstance(parts, list):
+            raise ValueError("Gemini candidate content missing parts")
         answer_text = "".join(
             part["text"]
             for part in parts
@@ -267,7 +333,7 @@ def gemini(prompt: str, image: bytes | None = None, mime: str = "image/jpeg") ->
             cleaned_text = re.sub(r"\s*```$", "", cleaned_text)
         return cleaned_text
     except Exception as exc:
-        _log_provider_exception(exc, key, image or b"")
+        _log_provider_exception(exc, key, image or b"", stage="gemini_extraction", model=selected_model)
         logger.warning("Gemini response parsing failed: model=%s", selected_model)
         raise
 
@@ -278,19 +344,36 @@ async def analyze(mode: Literal["safety", "crack"], image: UploadFile = File(...
     if len(data) > 12 * 1024 * 1024: raise HTTPException(413, "Image must be 12 MB or smaller")
     instruction = ("Review this construction site photo for visibly observable PPE and hazards. Do not infer hidden facts. Return JSON with summary, findings array of title,detail,severity(low|medium|high),confidence(0..1),action, limitations array. State observations are not verified compliance." if mode == "safety" else "Describe the visible crack pattern, cautious severity and possible causes, and inspection/remediation steps. Never infer precise dimensions without scale. Return JSON summary, findings array(title,detail,severity low|medium|high,confidence 0..1,action),limitations array.")
     try:
-        parsed = json.loads(gemini(instruction, data, image.content_type))
+        raw_text = gemini(instruction, data, image.content_type)
+        parsed = json.loads(raw_text)
+        if not isinstance(parsed, dict):
+            raise ValueError("Gemini response is not a JSON object")
         raw_limitations = parsed.get("limitations")
         limitations = [str(x) for x in raw_limitations] if isinstance(raw_limitations, list) else []
         if mode == "safety": limitations.append("Visual observations only; PPE compliance is not verified.")
         if mode == "crack": limitations.append("No precise crack dimensions can be inferred without a scale reference.")
-        return ImageAnalysis(mode=mode, provider="Gemini", summary=parsed["summary"], findings=parsed["findings"], limitations=limitations)
+        return ImageAnalysis(
+            mode=mode,
+            provider="Gemini",
+            summary=parsed.get("summary"),
+            findings=parsed.get("findings"),
+            limitations=limitations,
+        )
     except RuntimeError:
         raise HTTPException(503, "AI analysis unavailable: configure GEMINI_API_KEY. No demo result was generated.")
     except Exception as e:
         # Provider exceptions can include the request URL, which contains the
         # API key as a query parameter. Never return raw provider error text.
         if not isinstance(e, HTTPError) and not _is_timeout_error(e):
-            _log_provider_exception(e, gemini_api_key() or "", data)
+            status = getattr(e, "code", None) or getattr(e, "status_code", None)
+            _log_provider_exception(
+                e,
+                gemini_api_key() or "",
+                data,
+                stage="response_model",
+                model=gemini_model(),
+                provider_status=status if isinstance(status, int) else None,
+            )
         raise HTTPException(502, "AI provider error or invalid response")
 
 @app.post("/api/plan", response_model=PlanResponse)

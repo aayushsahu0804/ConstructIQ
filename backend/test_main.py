@@ -634,3 +634,179 @@ def test_analyze_uses_flash_lite_url_when_stale_gemini_38_is_in_environment(monk
     assert len(calls) == 1
     assert calls[0].endswith('/models/gemini-3.5-flash-lite:generateContent')
 
+def test_analyze_crack_analysis_success(monkeypatch):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+    crack_result = {
+        'summary': 'Visible diagonal shear cracking near beam-column connection.',
+        'findings': [{
+            'title': 'Diagonal shear crack',
+            'detail': 'Step-like fracture observed near junction.',
+            'severity': 'high',
+            'confidence': 0.88,
+            'action': 'Install temporary structural propping and consult licensed engineer.',
+        }],
+        'limitations': ['Visual observation only; internal reinforcement state not determined.'],
+    }
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{
+                    'content': {
+                        'role': 'model',
+                        'parts': [{'text': json.dumps(crack_result)}],
+                    },
+                    'finishReason': 'STOP',
+                }],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    response = client.post('/api/analyze?mode=crack', files={'image': ('crack.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data['mode'] == 'crack'
+    assert data['provider'] == 'Gemini'
+    assert data['summary'] == crack_result['summary']
+    assert len(data['findings']) == 1
+    assert data['findings'][0]['severity'] == 'high'
+    assert 'No precise crack dimensions can be inferred without a scale reference.' in data['limitations']
+
+@pytest.mark.parametrize('rest_envelope, expected_message', [
+    ({'candidates': []}, 'missing provider candidates'),
+    ({'candidates': [{'finishReason': 'STOP'}]}, 'missing provider candidate content'),
+    ({'candidates': [{'content': {'parts': []}}]}, 'missing provider candidate parts'),
+    ({'candidates': [{'content': {'parts': [{'text': 'thinking', 'thought': True}]}}]}, 'missing provider answer text'),
+])
+def test_analyze_missing_candidates_or_content_or_parts_or_text(monkeypatch, caplog, rest_envelope, expected_message):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return json.dumps(rest_envelope).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 502
+    assert response.json()['detail'] == 'AI provider error or invalid response'
+    assert expected_message in caplog.text
+    assert 'stage=gemini_extraction' in caplog.text
+
+def test_analyze_handles_blocked_model_response(monkeypatch, caplog):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+
+    class FakeBlockedPromptResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return json.dumps({'promptFeedback': {'blockReason': 'SAFETY'}}).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeBlockedPromptResponse())
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 502
+    assert 'provider blocked content' in caplog.text
+
+    class FakeBlockedCandidateResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{'finishReason': 'SAFETY', 'content': {'parts': [{'text': ''}]}}],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeBlockedCandidateResponse())
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+
+    assert response.status_code == 502
+    assert 'provider blocked content' in caplog.text
+
+def test_analyze_handles_malformed_json_and_non_object(monkeypatch, caplog):
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: 'test-only-key')
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+
+    class FakeResponse:
+        def __init__(self, raw_text): self.raw_text = raw_text
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{'content': {'parts': [{'text': self.raw_text}]}}],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse('Not valid JSON at all'))
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+    assert response.status_code == 502
+    assert 'exception_type=JSONDecodeError' in caplog.text
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse('["not", "a", "dict"]'))
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', b'test-image', 'image/png')})
+    assert response.status_code == 502
+    assert 'provider response is not a JSON object' in caplog.text
+
+def test_analyze_nested_validation_error_diagnostics(monkeypatch, caplog):
+    secret = 'secret-key-12345'
+    image_bytes = b'confidential-site-photo'
+    monkeypatch.setattr(main, 'gemini_api_key', lambda: secret)
+    monkeypatch.setattr(main, 'gemini_model', lambda: 'gemini-3.5-flash-lite')
+    invalid_data = {
+        'summary': 'Hazard check',
+        'findings': [
+            {
+                'title': 'Excavation edge',
+                'detail': 'Unguarded pit',
+                'severity': 'extreme',  # Invalid enum value
+                'confidence': 1.5,       # Exceeds maximum 1.0
+                # 'action' missing
+            },
+        ],
+        'limitations': [],
+    }
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            return json.dumps({
+                'candidates': [{'content': {'parts': [{'text': json.dumps(invalid_data)}]}}],
+            }).encode()
+
+    monkeypatch.setattr(main.urllib.request, 'urlopen', lambda *_args, **_kwargs: FakeResponse())
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        response = client.post('/api/analyze?mode=safety', files={'image': ('site.png', image_bytes, 'image/png')})
+
+    assert response.status_code == 502
+    assert response.json()['detail'] == 'AI provider error or invalid response'
+    assert 'exception_type=ValidationError' in caplog.text
+    assert 'stage=response_model' in caplog.text
+    assert 'model=gemini-3.5-flash-lite' in caplog.text
+    assert 'findings.0.severity:literal_error' in caplog.text
+    assert 'findings.0.confidence:less_than_equal' in caplog.text
+    assert 'findings.0.action:missing' in caplog.text
+    assert secret not in caplog.text
+    assert image_bytes.decode() not in caplog.text
+
+def test_log_provider_exception_non_standard_validation_error(caplog):
+    class CustomValidationError(Exception):
+        def errors(self, include_input=False, include_context=False):
+            return [{'loc': ('findings', 0, 'severity'), 'type': 'literal_error'}]
+
+    exc = CustomValidationError('synthetic validation failure')
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        main._log_provider_exception(exc, 'test-key', b'', stage='response_model', model='gemini-3.5-flash-lite')
+
+    assert 'exception_type=CustomValidationError' in caplog.text
+    assert 'stage=response_model' in caplog.text
+    assert 'model=gemini-3.5-flash-lite' in caplog.text
+    assert 'response schema validation failed (findings.0.severity:literal_error)' in caplog.text
